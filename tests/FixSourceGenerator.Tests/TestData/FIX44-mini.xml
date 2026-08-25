@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal FIX 4.4 DataDictionary subset used for SchemaReader unit tests.
+  Deliberately tiny: one component, one repeating group, one message with
+  a header/trailer, enum values, and a variety of field types so the
+  parser (and later codegen) can be exercised without a full ~1000-field
+  QuickFIX dictionary.
+-->
+<fix type="FIX" major="4" minor="4" servicepack="0">
+  <header>
+    <field name="BeginString" required="Y"/>
+    <field name="BodyLength" required="Y"/>
+    <field name="MsgType" required="Y"/>
+    <field name="SenderCompID" required="Y"/>
+    <field name="TargetCompID" required="Y"/>
+    <field name="MsgSeqNum" required="Y"/>
+    <field name="SendingTime" required="Y"/>
+  </header>
+  <trailer>
+    <field name="CheckSum" required="Y"/>
+  </trailer>
+  <messages>
+    <message name="NewOrderSingle" msgtype="D" msgcat="app">
+      <field name="ClOrdID" required="Y"/>
+      <component name="Instrument" required="Y"/>
+      <field name="Side" required="Y"/>
+      <field name="OrderQty" required="Y"/>
+      <field name="OrdType" required="Y"/>
+      <field name="Price" required="N"/>
+      <group name="NoPartyIDs" required="N">
+        <field name="PartyID" required="Y"/>
+        <field name="PartyIDSource" required="N"/>
+        <field name="PartyRole" required="N"/>
+      </group>
+    </message>
+  </messages>
+  <components>
+    <component name="Instrument">
+      <field name="Symbol" required="Y"/>
+      <field name="SecurityID" required="N"/>
+    </component>
+  </components>
+  <fields>
+    <field number="8" name="BeginString" type="STRING"/>
+    <field number="9" name="BodyLength" type="LENGTH"/>
+    <field number="10" name="CheckSum" type="STRING"/>
+    <field number="11" name="ClOrdID" type="STRING"/>
+    <field number="21" name="unused" type="CHAR"/>
+    <field number="35" name="MsgType" type="STRING"/>
+    <field number="38" name="OrderQty" type="QTY"/>
+    <field number="40" name="OrdType" type="CHAR">
+      <value enum="1" description="MARKET"/>
+      <value enum="2" description="LIMIT"/>
+    </field>
+    <field number="44" name="Price" type="PRICE"/>
+    <field number="48" name="SecurityID" type="STRING"/>
+    <field number="49" name="SenderCompID" type="STRING"/>
+    <field number="52" name="SendingTime" type="UTCTIMESTAMP"/>
+    <field number="54" name="Side" type="CHAR">
+      <value enum="1" description="BUY"/>
+      <value enum="2" description="SELL"/>
+    </field>
+    <field number="55" name="Symbol" type="STRING"/>
+    <field number="56" name="TargetCompID" type="STRING"/>
+    <field number="34" name="MsgSeqNum" type="SEQNUM"/>
+    <field number="453" name="NoPartyIDs" type="NUMINGROUP"/>
+    <field number="448" name="PartyID" type="STRING"/>
+    <field number="447" name="PartyIDSource" type="CHAR"/>
+    <field number="452" name="PartyRole" type="INT"/>
+  </fields>
+</fix>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4">
+  <header/>
+  <trailer/>
+  <messages/>
+  <components>
+    <component name="A">
+      <component name="B" required="Y"/>
+    </component>
+    <component name="B">
+      <component name="A" required="Y"/>
+    </component>
+  </components>
+  <fields/>
+</fix>

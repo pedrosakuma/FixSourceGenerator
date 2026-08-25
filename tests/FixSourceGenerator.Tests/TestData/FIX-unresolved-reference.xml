@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4">
+  <header/>
+  <trailer/>
+  <messages>
+    <message name="Heartbeat" msgtype="0" msgcat="admin">
+      <field name="DoesNotExist" required="N"/>
+    </message>
+  </messages>
+  <components/>
+  <fields/>
+</fix>

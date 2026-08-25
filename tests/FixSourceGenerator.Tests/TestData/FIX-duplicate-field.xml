@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4">
+  <header/>
+  <trailer/>
+  <messages/>
+  <components/>
+  <fields>
+    <field number="1" name="Account" type="STRING"/>
+    <field number="1" name="AccountDup" type="STRING"/>
+  </fields>
+</fix>

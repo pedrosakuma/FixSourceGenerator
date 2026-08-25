@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>netstandard2.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<IsRoslynComponent>true</IsRoslynComponent>
+		<LangVersion>latest</LangVersion>
+		<EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+		<NoWarn>$(NoWarn);CS1591</NoWarn>
+		<IncludeBuildOutput>false</IncludeBuildOutput>
+		<PackageId>FixSourceGenerator</PackageId>
+		<Title>FIX Source Generator</Title>
+		<Version>0.1.0</Version>
+		<Authors>Pedro Sakuma</Authors>
+		<Company>Pedro Sakuma</Company>
+		<Product>FIX Source Generator</Product>
+		<Description>Roslyn source generator that produces strongly typed C# code from FIX-based market data XML schemas.</Description>
+		<PackageTags>FIX;SourceGenerator;Roslyn;MarketData</PackageTags>
+		<PackageProjectUrl>https://github.com/pedrosakuma/FixSourceGenerator</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/pedrosakuma/FixSourceGenerator</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<DevelopmentDependency>true</DevelopmentDependency>
+		<SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<EmbedUntrackedSources>true</EmbedUntrackedSources>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" PrivateAssets="all" />
+		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="README.md" Pack="true" PackagePath="/" />
+		<None Include="../../LICENSE.txt" Pack="true" PackagePath="/" />
+		<None Include="buildTransitive\FixSourceGenerator.props" Pack="true" PackagePath="buildTransitive/" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+	</ItemGroup>
+
+	<Import Project="build\AnalyzerReleases.props" />
+</Project>
