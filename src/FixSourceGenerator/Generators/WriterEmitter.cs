@@ -13,6 +13,10 @@ namespace FixSourceGenerator.Generators
     /// would require C# 11 <c>ref</c> fields (net7+), whereas the generated code targets net6+.
     /// The group counter (NUMINGROUP) is exposed as a normal <c>Write{Counter}(int)</c> — automatic
     /// count back-patch (docs/CONTRACT.md §6 ideal) is a documented fast-follow.
+    /// Header/trailer fields (docs/CONTRACT.md §1) are flattened onto the same writer alongside the
+    /// message body, in header → body → trailer order, so a single writer instance can produce a
+    /// complete, valid wire message (issue #10) — BeginString/BodyLength/MsgType/CheckSum stay
+    /// automatic (<c>BeginMessage</c>/<c>Finish</c>) and are never exposed as writable fields.
     /// </remarks>
     internal sealed class WriterEmitter
     {
@@ -23,7 +27,7 @@ namespace FixSourceGenerator.Generators
             _runtimeNs = runtimeNs;
         }
 
-        public void EmitWriter(CodeWriter w, string typeName, FixMessageDef message, string beginString)
+        public void EmitWriter(CodeWriter w, string typeName, FixMessageDef message, string beginString, IReadOnlyList<FixEntry> header, IReadOnlyList<FixEntry> trailer)
         {
             w.Open($"public ref struct {typeName}");
             w.Line($"public const string MsgType = {Quote(message.MsgType)};");
@@ -39,6 +43,32 @@ namespace FixSourceGenerator.Generators
             w.Close();
 
             var used = new Dictionary<string, int>();
+
+            // Header/trailer fields (docs/CONTRACT.md §1: "common to all messages in the
+            // dictionary"). BeginString/BodyLength/MsgType/CheckSum are structural and already
+            // handled automatically (BeginMessage/Finish above) — every other header/trailer field
+            // (SenderCompID, TargetCompID, MsgSeqNum, SendingTime, Signature, etc.) needs an
+            // explicit Write{Field} so a caller can actually produce a complete, valid wire message
+            // (previously only the message body was writable — see issue #10).
+            var headerFlat = new List<(FixFieldDef Field, bool IsGroupCounter)>();
+            Flatten(header, headerFlat);
+            foreach (var (field, isGroupCounter) in headerFlat)
+            {
+                if (IsAutomaticEnvelopeField(field))
+                {
+                    continue;
+                }
+
+                string? method = MethodName(field, used);
+                if (method == null)
+                {
+                    continue;
+                }
+
+                w.Line();
+                EmitWriteMethod(w, field, method, isGroupCounter);
+            }
+
             var flat = new List<(FixFieldDef Field, bool IsGroupCounter)>();
             Flatten(message.Entries, flat);
 
@@ -54,10 +84,37 @@ namespace FixSourceGenerator.Generators
                 EmitWriteMethod(w, field, method, isGroupCounter);
             }
 
+            var trailerFlat = new List<(FixFieldDef Field, bool IsGroupCounter)>();
+            Flatten(trailer, trailerFlat);
+            foreach (var (field, isGroupCounter) in trailerFlat)
+            {
+                if (IsAutomaticEnvelopeField(field))
+                {
+                    continue;
+                }
+
+                string? method = MethodName(field, used);
+                if (method == null)
+                {
+                    continue;
+                }
+
+                w.Line();
+                EmitWriteMethod(w, field, method, isGroupCounter);
+            }
+
             w.Line();
             w.Line("public int Finish() => _writer.Finish();");
             w.Close();
         }
+
+        /// <summary>
+        /// BeginString (8), BodyLength (9), MsgType (35) and CheckSum (10) are always emitted
+        /// automatically by <c>BeginMessage</c>/<c>Finish</c> — never exposed as a writable field,
+        /// even though they're formally part of the header/trailer entry lists.
+        /// </summary>
+        private static bool IsAutomaticEnvelopeField(FixFieldDef field) =>
+            field.Number == 8 || field.Number == 9 || field.Number == 35 || field.Number == 10;
 
         private void EmitWriteMethod(CodeWriter w, FixFieldDef field, string method, bool isGroupCounter)
         {

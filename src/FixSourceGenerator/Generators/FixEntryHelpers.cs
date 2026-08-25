@@ -92,6 +92,20 @@ namespace FixSourceGenerator.Generators
         /// <summary>Collects every component definition reachable from <paramref name="entries"/>.</summary>
         public static void CollectComponents(IReadOnlyList<FixEntry> entries, Dictionary<string, FixComponentDef> into)
         {
+            var visited = new HashSet<string>();
+            CollectComponents(entries, into, visited);
+        }
+
+        /// <summary>Collects every named group shape reachable from <paramref name="entries"/>.</summary>
+        public static void CollectGroups(IReadOnlyList<FixEntry> entries, Dictionary<string, FixGroupRef> into)
+        {
+            var visitedComponents = new HashSet<string>();
+            CollectGroups(entries, into, visitedComponents);
+        }
+
+
+        private static void CollectComponents(IReadOnlyList<FixEntry> entries, Dictionary<string, FixComponentDef> into, HashSet<string> visited)
+        {
             foreach (var entry in entries)
             {
                 switch (entry)
@@ -102,10 +116,34 @@ namespace FixSourceGenerator.Generators
                             into[componentRef.Component.Name] = componentRef.Component;
                         }
 
-                        CollectComponents(componentRef.Component.Entries, into);
+                        if (visited.Add(componentRef.Component.Name))
+                        {
+                            CollectComponents(componentRef.Component.Entries, into, visited);
+                        }
+
                         break;
                     case FixGroupRef groupRef:
-                        CollectComponents(groupRef.Entries, into);
+                        CollectComponents(groupRef.Entries, into, visited);
+                        break;
+                }
+            }
+        }
+
+        private static void CollectGroups(IReadOnlyList<FixEntry> entries, Dictionary<string, FixGroupRef> into, HashSet<string> visitedComponents)
+        {
+            foreach (var entry in entries)
+            {
+                switch (entry)
+                {
+                    case FixComponentRef componentRef when visitedComponents.Add(componentRef.Component.Name):
+                        CollectGroups(componentRef.Component.Entries, into, visitedComponents);
+                        break;
+                    case FixGroupRef groupRef:
+                        if (!into.ContainsKey(groupRef.Name))
+                        {
+                            into[groupRef.Name] = groupRef;
+                        }
+                        CollectGroups(groupRef.Entries, into, visitedComponents);
                         break;
                 }
             }
