@@ -272,12 +272,14 @@ internal static class TestSupport
         return result;
     }
 
-    public static CSharpCompilation Compile(IEnumerable<string> sources)
+    public static CSharpCompilation Compile(IEnumerable<string> sources) => Compile(sources, "GeneratedFixAssembly");
+
+    public static CSharpCompilation Compile(IEnumerable<string> sources, string assemblyName)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Preview);
         var trees = sources.Select(s => CSharpSyntaxTree.ParseText(s, parseOptions));
         return CSharpCompilation.Create(
-            "GeneratedFixAssembly",
+            assemblyName,
             trees,
             References,
             new CSharpCompilationOptions(
@@ -287,9 +289,11 @@ internal static class TestSupport
                 allowUnsafe: false));
     }
 
-    public static Assembly EmitAndLoad(IEnumerable<string> sources)
+    public static Assembly EmitAndLoad(IEnumerable<string> sources) => EmitAndLoad(sources, "GeneratedFixAssembly");
+
+    public static Assembly EmitAndLoad(IEnumerable<string> sources, string assemblyName)
     {
-        var compilation = Compile(sources);
+        var compilation = Compile(sources, assemblyName);
         using var ms = new MemoryStream();
         var emit = compilation.Emit(ms);
         Assert.True(emit.Success, "Emit failed:\n" + string.Join("\n", emit.Diagnostics
