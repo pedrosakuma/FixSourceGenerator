@@ -152,6 +152,117 @@ internal static class TestSupport
             fieldsByNumber: EmptyByNumber);
     }
 
+    public static FixDictionary BuildDiffDictionary(
+        IEnumerable<FixMessageDef>? messages = null,
+        IReadOnlyDictionary<string, FixComponentDef>? components = null,
+        IReadOnlyDictionary<string, FixFieldDef>? fields = null)
+    {
+        var resolvedFields = fields ?? BuildDiffFields();
+        var resolvedComponents = components ?? BuildDiffComponents(resolvedFields);
+        var resolvedMessages = messages?.ToList() ?? new List<FixMessageDef> { BuildExecutionReport(fieldMap: resolvedFields, componentMap: resolvedComponents, includeInstrument: resolvedComponents.ContainsKey("Instrument")) };
+
+        return new FixDictionary(
+            "FIX", 4, 4, 0,
+            header: new List<FixEntry>(),
+            trailer: new List<FixEntry>(),
+            messages: resolvedMessages,
+            componentsByName: resolvedComponents,
+            fieldsByName: resolvedFields,
+            fieldsByNumber: resolvedFields.Values.ToDictionary(field => field.Number));
+    }
+
+    public static IReadOnlyDictionary<string, FixFieldDef> BuildDiffFields(
+        string symbolType = "STRING",
+        IReadOnlyList<FixValueDef>? sideValues = null)
+    {
+        var values = sideValues ?? new List<FixValueDef>
+        {
+            new FixValueDef("1", "BUY"),
+            new FixValueDef("2", "SELL"),
+        };
+
+        var fields = new[]
+        {
+            new FixFieldDef(35, "MsgType", "STRING", new List<FixValueDef>()),
+            new FixFieldDef(37, "OrderID", "STRING", new List<FixValueDef>()),
+            new FixFieldDef(54, "Side", "CHAR", values),
+            new FixFieldDef(55, "Symbol", symbolType, new List<FixValueDef>()),
+            new FixFieldDef(58, "Text", "STRING", new List<FixValueDef>()),
+            new FixFieldDef(448, "PartyID", "STRING", new List<FixValueDef>()),
+            new FixFieldDef(452, "PartyRole", "INT", new List<FixValueDef>()),
+            new FixFieldDef(453, "NoPartyIDs", "NUMINGROUP", new List<FixValueDef>()),
+        };
+
+        return fields.ToDictionary(field => field.Name);
+    }
+
+    public static IReadOnlyDictionary<string, FixComponentDef> BuildDiffComponents(IReadOnlyDictionary<string, FixFieldDef>? fieldMap = null)
+    {
+        var fields = fieldMap ?? BuildDiffFields();
+        var instrument = new FixComponentDef("Instrument", new List<FixEntry>
+        {
+            new FixFieldRef(fields["Symbol"], required: true),
+        });
+
+        return new Dictionary<string, FixComponentDef>
+        {
+            [instrument.Name] = instrument,
+        };
+    }
+
+    public static FixMessageDef BuildExecutionReport(
+        string msgType = "8",
+        bool includeSymbol = true,
+        bool includeText = true,
+        bool includeOptionalOrderId = true,
+        bool includePartyRole = true,
+        bool includeInstrument = true,
+        IReadOnlyDictionary<string, FixComponentDef>? componentMap = null,
+        IReadOnlyDictionary<string, FixFieldDef>? fieldMap = null)
+    {
+        var fields = fieldMap ?? BuildDiffFields();
+        var components = componentMap ?? BuildDiffComponents(fields);
+        var entries = new List<FixEntry>();
+
+        if (includeSymbol)
+        {
+            entries.Add(new FixFieldRef(fields["Symbol"], required: true));
+        }
+
+        entries.Add(new FixFieldRef(fields["Side"], required: true));
+
+        if (includeOptionalOrderId)
+        {
+            entries.Add(new FixFieldRef(fields["OrderID"], required: false));
+        }
+
+        if (includeText)
+        {
+            entries.Add(new FixFieldRef(fields["Text"], required: true));
+        }
+
+        if (includeInstrument)
+        {
+            entries.Add(new FixComponentRef(components["Instrument"], required: false));
+        }
+        entries.Add(new FixGroupRef(
+            "NoPartyIDs",
+            fields["NoPartyIDs"],
+            includePartyRole
+                ? new List<FixEntry>
+                {
+                    new FixFieldRef(fields["PartyID"], required: true),
+                    new FixFieldRef(fields["PartyRole"], required: false),
+                }
+                : new List<FixEntry>
+                {
+                    new FixFieldRef(fields["PartyID"], required: true),
+                },
+            required: false));
+
+        return new FixMessageDef("ExecutionReport", msgType, "app", entries);
+    }
+
     public static List<(string hintName, string content)> Generate(FixDictionary dictionary, out List<Diagnostic> diagnostics)
     {
         var diags = new List<Diagnostic>();
