@@ -39,10 +39,10 @@ namespace FixSourceGenerator.Generators
             w.Close();
 
             var used = new Dictionary<string, int>();
-            var flat = new List<FixFieldDef>();
+            var flat = new List<(FixFieldDef Field, bool IsGroupCounter)>();
             Flatten(message.Entries, flat);
 
-            foreach (var field in flat)
+            foreach (var (field, isGroupCounter) in flat)
             {
                 string? method = MethodName(field, used);
                 if (method == null)
@@ -51,7 +51,7 @@ namespace FixSourceGenerator.Generators
                 }
 
                 w.Line();
-                EmitWriteMethod(w, field, method);
+                EmitWriteMethod(w, field, method, isGroupCounter);
             }
 
             w.Line();
@@ -59,12 +59,17 @@ namespace FixSourceGenerator.Generators
             w.Close();
         }
 
-        private void EmitWriteMethod(CodeWriter w, FixFieldDef field, string method)
+        private void EmitWriteMethod(CodeWriter w, FixFieldDef field, string method, bool isGroupCounter)
         {
             int tag = field.Number;
             var translated = TypeTranslator.Translate(field.Type);
 
-            if (FixEntryHelpers.IsEnumEligible(field))
+            // Group counter (NUMINGROUP) fields are structural, not semantic values — even when a
+            // real dictionary attaches documentary <value> entries to them (e.g. FIX44's NoSides:
+            // "1=ONE_SIDE"/"2=BOTH_SIDES" describing what the count means, not a value domain), no
+            // enum type is generated for them (see FixEntryHelpers.CollectEnumFields), so the
+            // writer must always expose them as a plain int, never as an enum parameter.
+            if (!isGroupCounter && FixEntryHelpers.IsEnumEligible(field))
             {
                 string enumName = field.Name.ToIdentifier();
                 string cast = translated.Category == FixTypeCategory.Char ? "(char)value" : "(int)value";
@@ -104,20 +109,20 @@ namespace FixSourceGenerator.Generators
             w.Line($"public void {method}({paramType} value) => _writer.WriteField({tag}, value);");
         }
 
-        private static void Flatten(IReadOnlyList<FixEntry> entries, List<FixFieldDef> into)
+        private static void Flatten(IReadOnlyList<FixEntry> entries, List<(FixFieldDef Field, bool IsGroupCounter)> into)
         {
             foreach (var entry in entries)
             {
                 switch (entry)
                 {
                     case FixFieldRef fieldRef:
-                        into.Add(fieldRef.Field);
+                        into.Add((fieldRef.Field, false));
                         break;
                     case FixComponentRef componentRef:
                         Flatten(componentRef.Component.Entries, into);
                         break;
                     case FixGroupRef groupRef:
-                        into.Add(groupRef.CounterField);
+                        into.Add((groupRef.CounterField, true));
                         Flatten(groupRef.Entries, into);
                         break;
                 }
