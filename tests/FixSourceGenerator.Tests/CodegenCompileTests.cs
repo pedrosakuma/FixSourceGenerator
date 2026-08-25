@@ -14,7 +14,7 @@ public class CodegenCompileTests
         Assert.Contains(files, f => f.hintName.EndsWith("Runtime.FixRuntime.g.cs"));
         Assert.Contains(files, f => f.hintName.EndsWith("NewOrderSingle.g.cs"));
         Assert.Contains(files, f => f.hintName.EndsWith("Enums.g.cs"));
-        Assert.Contains(files, f => f.hintName.EndsWith("Components.g.cs"));
+        Assert.Contains(files, f => f.hintName.EndsWith("Instrument.g.cs"));
 
         var compilation = TestSupport.Compile(files.Select(f => f.content));
         var errors = compilation.GetDiagnostics()

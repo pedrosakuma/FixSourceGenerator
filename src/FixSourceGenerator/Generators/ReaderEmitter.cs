@@ -187,6 +187,11 @@ namespace FixSourceGenerator.Generators
             w.Line($"public {readerType} {prop} => new {readerType}(_buffer);");
         }
 
+        public void EmitStandaloneGroupReader(CodeWriter w, FixGroupRef groupRef)
+        {
+            EmitGroupTypes(w, groupRef);
+        }
+
         private void EmitGroupTypes(CodeWriter w, FixGroupRef groupRef)
         {
             string groupId = groupRef.Name.ToIdentifier();
