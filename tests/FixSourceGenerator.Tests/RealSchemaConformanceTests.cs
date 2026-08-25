@@ -8,11 +8,13 @@ using Xunit;
 namespace FixSourceGenerator.Tests;
 
 /// <summary>
-/// Conformance tests (issue #7) against a real, public FIX DataDictionary — the FIX 4.4 SP2
-/// schema shipped by the QuickFIX project (`TestData/FIX44.xml`, BSD-licensed, see the adjacent
-/// `.NOTICE.md`). These exercise the parser + codegen against the full breadth of a real
-/// dictionary (912 fields, 632 components, 93 groups, 93 messages) rather than the small hand
-/// authored fixtures used elsewhere, to catch edge cases (deeply nested components, large enums,
+/// Conformance tests (issue #7) against real, public FIX DataDictionaries — the FIX 4.4 SP2
+/// schema (`TestData/FIX44.xml`) and the FIX 5.0 SP2 schema (`TestData/FIX50SP2.xml`), both
+/// shipped by the QuickFIX project (BSD-licensed, see the adjacent `.NOTICE.md` files). These
+/// exercise the parser + codegen against the full breadth of real dictionaries (FIX44: 912
+/// fields/632 components/93 groups/93 messages; FIX50SP2: 6000+ fields/725 components/156
+/// messages, the largest public dictionary available) rather than the small hand-authored
+/// fixtures used elsewhere, to catch edge cases (deeply nested components, large enums,
 /// uncommon field types) that a minimal fixture can't.
 /// </summary>
 public class RealSchemaConformanceTests
@@ -109,4 +111,44 @@ public class RealSchemaConformanceTests
         Assert.True(emitResult.Success, "Generated code for full FIX44 dictionary failed to compile:\n" +
             string.Join("\n", errors.Take(30)) + (errors.Count > 30 ? $"\n... and {errors.Count - 30} more" : ""));
     }
+
+    private static string LoadFix50Sp2Xml() =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestData", "FIX50SP2.xml"));
+
+    /// <summary>
+    /// FIX 5.0 SP2 (`TestData/FIX50SP2.xml`) is the largest/most complex public DataDictionary
+    /// available (156 messages, 6000+ fields, 725 components) — kept as a permanent regression
+    /// fixture (alongside FIX44 above) to catch codegen issues like #11 that only surface at scale
+    /// or with constructs not present in the smaller FIX44 dictionary.
+    /// </summary>
+    [Fact]
+    public void Generates_and_compiles_code_for_the_full_FIX50SP2_dictionary()
+    {
+        var diagnostics = new System.Collections.Generic.List<Diagnostic>();
+        var schema = SchemaReader.Parse(LoadFix50Sp2Xml(), "FIX50SP2.xml", diagnostics.Add);
+        Assert.NotNull(schema);
+
+        var errors = diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+        Assert.True(errors.Count == 0, "Parser errors on real FIX50SP2 schema:\n" + string.Join("\n", errors));
+
+        var codegenDiagnostics = new System.Collections.Generic.List<Diagnostic>();
+        var context = new GenerationContext(codegenDiagnostics.Add);
+        var sources = new FixCodeGenerator()
+            .Generate("Conformance.Fix.V50SP2", schema!, context)
+            .Select(s => s.content)
+            .ToList();
+
+        Assert.NotEmpty(sources);
+
+        var unexpected = codegenDiagnostics.Where(d => d.Id != "FIX006").ToList();
+        Assert.True(unexpected.Count == 0, "Unexpected codegen diagnostics:\n" + string.Join("\n", unexpected));
+
+        var compilation = TestSupport.Compile(sources);
+        var emitResult = compilation.Emit(Stream.Null);
+
+        var compileErrors = emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+        Assert.True(emitResult.Success, "Generated code for full FIX50SP2 dictionary failed to compile:\n" +
+            string.Join("\n", compileErrors.Take(30)) + (compileErrors.Count > 30 ? $"\n... and {compileErrors.Count - 30} more" : ""));
+    }
 }
+
