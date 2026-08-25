@@ -94,6 +94,29 @@ public static class QfnFixTestDriver
         Array.Copy(dest, result, len);
         return result;
     }
+
+    public static byte[] EncodeNewOrderSingleWithHeader(
+        string clOrdId, string symbol, bool buy, decimal qty, decimal price, DateTime transactTime,
+        string senderCompId, string targetCompId, int msgSeqNum, DateTime sendingTime)
+    {
+        var dest = new byte[1024];
+        var w = new NewOrderSingleWriter(dest);
+        w.WriteSenderCompID(A(senderCompId));
+        w.WriteTargetCompID(A(targetCompId));
+        w.WriteMsgSeqNum(msgSeqNum);
+        w.WriteSendingTime(sendingTime);
+        w.WriteClOrdID(A(clOrdId));
+        w.WriteSymbol(A(symbol));
+        w.WriteSide(buy ? Side.Buy : Side.Sell);
+        w.WriteOrderQty(qty);
+        w.WriteOrdType(OrdType.Limit);
+        w.WritePrice(price);
+        w.WriteTransactTime(transactTime);
+        int len = w.Finish();
+        var result = new byte[len];
+        Array.Copy(dest, result, len);
+        return result;
+    }
 }
 ";
 
@@ -180,14 +203,40 @@ public static class QfnFixTestDriver
         string wire = System.Text.Encoding.ASCII.GetString(bytes);
 
         var msg = new NewOrderSingle();
-        // validate:false — our generated writer only emits the message body (per docs/CONTRACT.md
-        // §2.2, header/trailer fields beyond BeginString/BodyLength/MsgType/CheckSum are out of
-        // scope for the message writer), so the wire message intentionally omits required header
-        // fields (SenderCompID, TargetCompID, MsgSeqNum, SendingTime) that QuickFIX/n's dictionary
-        // validation would otherwise reject.
+        // validate:false — this particular helper only writes the message body, exercised here to
+        // keep a minimal-fields round trip covered independently of header/trailer writing.
         msg.FromString(wire, false, Dictionary, Dictionary, new MessageFactory());
 
         Assert.Equal("ORD-3", msg.GetString(new QuickFix.Fields.ClOrdID().Tag));
+        Assert.Equal("GOOG", msg.GetString(new QuickFix.Fields.Symbol().Tag));
+        Assert.Equal(QuickFix.Fields.Side.BUY, msg.Get(new QuickFix.Fields.Side()).Value);
+        Assert.Equal(25m, msg.Get(new QuickFix.Fields.OrderQty()).Value);
+        Assert.Equal(150.5m, msg.Get(new QuickFix.Fields.Price()).Value);
+    }
+
+    [Fact]
+    public void QuickFixN_decodes_a_fully_valid_message_built_by_our_writer_including_header()
+    {
+        // Issue #10: the generated writer can now also write header fields, so the resulting wire
+        // message carries everything QuickFIX/n's DataDictionary validation requires
+        // (SenderCompID/TargetCompID/MsgSeqNum/SendingTime) — validate:true proves true wire
+        // compatibility end-to-end, no longer requiring the validate:false workaround.
+        var (_, driver) = BuildGeneratedFix44();
+        var transactTime = new DateTime(2024, 1, 15, 10, 30, 0, DateTimeKind.Utc);
+        var sendingTime = new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc);
+
+        byte[] bytes = Call<byte[]>(driver, "EncodeNewOrderSingleWithHeader",
+            "ORD-5", "GOOG", true, 25m, 150.5m, transactTime,
+            "SENDER", "TARGET", 11, sendingTime);
+        string wire = System.Text.Encoding.ASCII.GetString(bytes);
+
+        var msg = new NewOrderSingle();
+        msg.FromString(wire, true, Dictionary, Dictionary, new MessageFactory());
+
+        Assert.Equal("SENDER", msg.Header.GetString(new QuickFix.Fields.SenderCompID().Tag));
+        Assert.Equal("TARGET", msg.Header.GetString(new QuickFix.Fields.TargetCompID().Tag));
+        Assert.Equal(11, msg.Header.GetInt(new QuickFix.Fields.MsgSeqNum().Tag));
+        Assert.Equal("ORD-5", msg.GetString(new QuickFix.Fields.ClOrdID().Tag));
         Assert.Equal("GOOG", msg.GetString(new QuickFix.Fields.Symbol().Tag));
         Assert.Equal(QuickFix.Fields.Side.BUY, msg.Get(new QuickFix.Fields.Side()).Value);
         Assert.Equal(25m, msg.Get(new QuickFix.Fields.OrderQty()).Value);

@@ -137,8 +137,14 @@ Para cada mensagem, o generator emite um `{Message}Writer` (`ref struct` sobre
 
 - `BeginMessage(Span<byte> destination)` — escreve `8=FIX.{version}␁`, reserva um campo
   `9=` de largura fixa (placeholder) e `35={MsgType}␁`.
-- Métodos `Write{Field}(...)` por campo, na ordem do schema, escrevendo `tag=value␁`
-  direto no destino (sem objeto intermediário).
+- Métodos `Write{Field}(...)` por campo, na ordem header → body → trailer do schema
+  (issue #10), escrevendo `tag=value␁` direto no destino (sem objeto intermediário).
+  Campos de `<header>`/`<trailer>` (SenderCompID, TargetCompID, MsgSeqNum, SendingTime,
+  Signature etc.) são achatados no mesmo `{Message}Writer`, junto com os campos do
+  corpo — não há um writer de header/trailer separado (mesma razão do §"O que isso
+  implica" abaixo: `ref struct` não pode compartilhar posição via `ref` field em
+  net6+). `BeginString`/`BodyLength`/`MsgType`/`CheckSum` continuam automáticos e nunca
+  ganham um `Write{Field}` próprio.
 - `Finish()` — faz o *backpatch* do `BodyLength` (tag 9, sobrescrevendo o placeholder
   reservado) e calcula o `CheckSum` (tag 10) por soma corrida dos bytes já escritos,
   igual à técnica usada em produção por engines de baixa latência (ver pesquisa de
