@@ -5,9 +5,10 @@ A Roslyn-based source generator that converts FIX tag=value DataDictionary XML s
 types, in the spirit of [SbeSourceGenerator](https://github.com/pedrosakuma/SbeSourceGenerator)
 but for the tag=value wire format instead of Simple Binary Encoding.
 
-Status: early scaffolding. See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the design contract
-(input schema shape, C# output shape, type mapping, versioning, diagnostics) and the tracking
-issue [#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) for the overall roadmap.
+See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the full design contract (input schema shape,
+C# output shape, type mapping, versioning, diagnostics) and [`docs/USAGE.md`](docs/USAGE.md) for
+a getting-started guide, a worked example, and the schema-versioning guide. The tracking issue
+[#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) has the overall roadmap.
 
 ## Design highlights
 
@@ -27,12 +28,61 @@ issue [#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) for the o
 - **Namespace-isolated versioning**, so multiple FIX dictionary versions (e.g. 4.2 and 4.4) can
   coexist in the same consumer project.
 
+## Quick start
+
+1. Reference the package and add your DataDictionary XML as an `AdditionalFiles` item:
+
+   ```xml
+   <ItemGroup>
+     <PackageReference Include="FixSourceGenerator" Version="0.1.0" PrivateAssets="all" />
+     <AdditionalFiles Include="Schemas\FIX44.xml" />
+   </ItemGroup>
+   ```
+
+2. Build. The generator produces a reader/writer per message in a namespace derived from your
+   project's `RootNamespace` (or the `FixGeneratorNamespace` property) plus a version token, e.g.
+   `Acme.Fix.V44.NewOrderSingleReader` / `...NewOrderSingleWriter`.
+
+3. Decode:
+
+   ```csharp
+   using Acme.Fix.V44;
+
+   var reader = new NewOrderSingleReader(buffer); // ReadOnlySpan<byte>
+   string clOrdId = Encoding.ASCII.GetString(reader.ClOrdID);
+   decimal? price = reader.Price;      // T? for optional value fields
+   foreach (var alloc in reader.NoAllocs)   // groups are enumerated, never materialized
+   {
+       decimal qty = alloc.AllocQty;
+   }
+   ```
+
+4. Encode:
+
+   ```csharp
+   Span<byte> destination = stackalloc byte[512];
+   var writer = new NewOrderSingleWriter(destination);
+   writer.WriteClOrdID("ORD-1"u8);
+   writer.WriteSide(Side.Buy);
+   writer.WriteOrderQty(100m);
+   int length = writer.Finish(); // backpatches BodyLength + CheckSum
+   ```
+
+See [`docs/USAGE.md`](docs/USAGE.md) for the full worked example (including components and
+nested groups) and guidance on versioning schemas over time.
+
 ## Repository layout
 
 - `src/FixSourceGenerator` — the Roslyn incremental source generator (`netstandard2.0`).
-- `tests/FixSourceGenerator.Tests` — unit and generator-driver tests.
+  - `Schema/` — the parsed/resolved schema model (`SchemaReader` + `FixDictionary` and friends).
+  - `Generators/` — codegen for readers, writers, enums, components, and the embedded runtime.
+  - `Diff/` — `SchemaDiffer`, for comparing two dictionary versions and flagging breaking changes.
+- `tests/FixSourceGenerator.Tests` — unit, generator-driver, and real-schema conformance tests.
 - `docs/CONTRACT.md` — the normative design contract for input schema and generated output.
+- `docs/USAGE.md` — getting-started guide, worked example, and schema-versioning guide.
+- `CHANGELOG.md` — release history.
 
 ## License
 
 MIT — see [`LICENSE.txt`](LICENSE.txt).
+

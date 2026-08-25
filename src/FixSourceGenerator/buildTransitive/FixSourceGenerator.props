@@ -2,4 +2,9 @@
   <ItemGroup>
     <Analyzer Include="$(MSBuildThisFileDirectory)..\analyzers\dotnet\cs\FixSourceGenerator.dll" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Makes the optional FixGeneratorNamespace MSBuild property visible to the generator
+         (RootNamespace is already compiler-visible by default via the .NET SDK). -->
+    <CompilerVisibleProperty Include="FixGeneratorNamespace" />
+  </ItemGroup>
 </Project>
