@@ -55,7 +55,7 @@ Given a `NewOrderSingle` (`MsgType=D`) message that includes the `Instrument` co
 ```csharp
 namespace Acme.Fix.V44;
 
-public ref struct NewOrderSingleReader // mutable: lazily builds an internal tag index as fields are read
+public readonly ref struct NewOrderSingleReader
 {
     public NewOrderSingleReader(ReadOnlySpan<byte> buffer);
 

@@ -79,9 +79,9 @@ mudança de forma.
 
 ### 3.1 Decode: reader `ref struct`
 
-Para cada mensagem, o generator emite um `ref struct {Message}Reader` (mutável — ver
-nota sobre índice lazy abaixo) que recebe um `ReadOnlySpan<byte>` (o corpo da mensagem
-já isolado do envelope, ou o buffer completo) e expõe:
+Para cada mensagem, o generator emite um `readonly ref struct {Message}Reader` que
+recebe um `ReadOnlySpan<byte>` (o corpo da mensagem já isolado do envelope, ou o buffer
+completo) e expõe:
 
 - **Propriedades por campo, com parsing lazy** — cada acesso faz o scan/parse do valor a
   partir do span subjacente; nada é pré-materializado no construtor além do índice
@@ -118,44 +118,28 @@ já isolado do envelope, ou o buffer completo) e expõe:
   `{Field}Values` (tipo `FixMultiValueEnumerator`, `ref struct`), um enumerador forward-only que
   faz split por espaço (ASCII `0x20`) sem copiar/alocar — cada `Current` é uma sub-`ReadOnlySpan<byte>`
   do span original. Compatível com `foreach` diretamente.
-- **Índice de tags — implementado como índice lazy incremental (decisão final, substitui
-  a nota anterior de design):** `FixSpanReader` mantém um cache de até
-  `MaxIndexedFields` (64) entradas `(Tag, Start, Length)` armazenado inline via
-  `[InlineArray(N)]` (não há alocação no heap; `ref struct` não pode guardar um
-  `Span<T>` oriundo de `stackalloc` em campo próprio — `InlineArray` contorna essa
-  restrição do compilador, pois seus dados vivem dentro do próprio struct). O índice é
-  construído **sob demanda**: cada `TryGetField` primeiro busca no prefixo já indexado
-  e, se não encontrar, continua o scan forward a partir de onde parou da última vez
-  (nunca reescaneando bytes já visitados), indexando cada campo novo até achar o tag
-  pedido ou esgotar o buffer. Mensagens com mais de `MaxIndexedFields` tags distintas
-  continuam corretas: além da capacidade do índice, o fallback volta a escanear (sem
-  cachear) o restante do buffer. Validado por benchmark isolado (não fazem parte da
-  suíte formal, mas documentados no histórico de decisão): essa estratégia nunca é mais
-  lenta que o scan-from-zero anterior e chega a ser de 1.2x a ~9x mais rápida
-  dependendo do tamanho da mensagem e da fração de campos efetivamente lidos — ao
-  contrário de um índice "eager" (construído inteiro no construtor), que regride
-  fortemente (até ~16x mais lento) quando poucos campos são lidos de mensagens
-  grandes. Por isso os readers gerados deixaram de ser `readonly ref struct` — a leitura
-  de uma propriedade agora pode mutar o cache interno do `FixSpanReader` como efeito
-  colateral (mudança de comportamento pública, aceita conscientemente em favor do ganho
-  de performance).
+- **Índice de tags:** para mensagens grandes/com muitos campos fora de ordem, o reader
+  pode manter um índice `Span<(int Tag, int Start, int Length)>` **stack-allocated**
+  (`stackalloc` ou buffer fornecido pelo chamador) construído em um único scan
+  forward-only — sem alocação no heap. Mensagens pequenas podem dispensar índice e fazer
+  scan direto por campo.
 
 ```csharp
-// Ilustrativo — forma real emitida pelo generator (ReaderEmitter.cs)
-public ref struct NewOrderSingleReader
+// Ilustrativo — forma exata definida na issue #5 (codegen)
+public readonly ref struct NewOrderSingleReader
 {
-    private FixSpanReader _reader;
+    private readonly ReadOnlySpan<byte> _buffer;
 
-    public NewOrderSingleReader(ReadOnlySpan<byte> buffer) => _reader = new FixSpanReader(buffer);
+    public NewOrderSingleReader(ReadOnlySpan<byte> buffer) => _buffer = buffer;
 
-    public ReadOnlySpan<byte> ClOrdIdBytes => _reader.GetField(11);
+    public ReadOnlySpan<byte> ClOrdIdBytes => FixSpanReader.GetTag(_buffer, tag: 11);
     public string ClOrdId => FixAscii.ToString(ClOrdIdBytes); // aloca só se chamado
 
-    public Side Side => (Side)_reader.GetByte(54);
+    public Side Side => (Side)FixSpanReader.GetChar(_buffer, tag: 54);
 
-    public InstrumentReader Instrument => new(_reader.Buffer);
+    public InstrumentReader Instrument => new(FixSpanReader.GetComponentSpan(_buffer, ComponentTags.Instrument));
 
-    public NoAllocsGroupReader NoAllocs => new(_reader.Buffer);
+    public NoAllocsGroupReader NoAllocs => new(_buffer, groupTag: 78 /* NoAllocs, NUMINGROUP */, entryTags: NoAllocsEntryTags);
 }
 ```
 
@@ -220,14 +204,11 @@ Importante não confundir dois TFMs distintos:
   SbeSourceGenerator. Isso é inegociável e independente da decisão abaixo.
 - **TFM do código gerado**, que roda no projeto consumidor: essa é a decisão de produto.
 
-**Decisão:** o código gerado usa `DateOnly`/`TimeOnly` (nativos, sem polyfill) e, desde a
-implementação do índice lazy de tags (ver §2 "Índice de tags"), `[InlineArray]`
-(C# 12/.NET 8+) internamente em `FixSpanReader`. Isso implica que o **projeto
-consumidor precisa ser net8+** (elevado de net6+ especificamente por causa do
-`InlineArray`). Isso é aceito conscientemente — não há intenção de suportar
-consumidores netstandard2.0/.NET Framework no v1. Multi-targeting condicional (`#if
-NET8_0_OR_GREATER` com fallback para consumidores legados) fica como fast-follow, caso
-surja demanda real.
+**Decisão:** o código gerado usa `DateOnly`/`TimeOnly` (nativos, sem polyfill), o que
+implica que o **projeto consumidor precisa ser net6+**. Isso é aceito conscientemente —
+não há intenção de suportar consumidores netstandard2.0/.NET Framework no v1. Multi-
+targeting condicional (`#if NET6_0_OR_GREATER` com fallback `DateTime`/`TimeSpan` para
+consumidores legados) fica como fast-follow, caso surja demanda real.
 
 ### Campos com `<value>`
 
@@ -325,7 +306,7 @@ semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
 |---|---|
 | Decode-only ou Decode+Encode no v1? | **Decode + Encode já no v1.** |
 | Tipos temporais: `string` bruto ou tipado? | **Tipado** (`DateOnly`/`TimeOnly`/`DateTime`, ver nota de TFM acima). |
-| TFM mínimo do código **gerado** (consumidor)? | **net8+** (o generator em si continua `netstandard2.0`, exigência do Roslyn) — permite `DateOnly`/`TimeOnly` nativos e `[InlineArray]` (índice lazy de tags, ver §2). Elevado de net6+ para net8+ ao implementar o índice. |
+| TFM mínimo do código **gerado** (consumidor)? | **net6+** (o generator em si continua `netstandard2.0`, exigência do Roslyn) — permite `DateOnly`/`TimeOnly` nativos. |
 | Suportar composição FIXT1.1 (transport) + FIX50SPx (app) no v1? | **Modelo do parser já preparado para merge; implementação completa é fast-follow** (ver §1.1) — evita rework estrutural depois sem inflar o v1. |
 | API primária: DTO alocado (`class`) ou reader/writer `ref struct` allocation-minimal? | **Reader/writer `ref struct`** sobre `Span`/`ReadOnlySpan<byte>`, sem DTO alocante por padrão — mesma premissa allocation-free do SbeSourceGenerator, adaptada ao domínio texto/variável do FIX. Validado por pesquisa de viabilidade com precedentes reais (Artio, PureFix, EPAM FixAntenna, `Utf8JsonReader`). Ver §2. |
 | `decimal` vs `double` para preço/quantidade? | **`decimal`** — consenso das 3 propostas, parseado direto do span sem alocação. |
