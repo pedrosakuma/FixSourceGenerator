@@ -51,9 +51,17 @@ namespace FixSourceGenerator.Schema
             {
                 reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "fix", "major"));
             }
+            else if (!int.TryParse(majorText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "major", majorText, "an integer"));
+            }
             if (minorText == null)
             {
                 reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "fix", "minor"));
+            }
+            else if (!int.TryParse(minorText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "minor", minorText, "an integer"));
             }
 
             int major = ParseIntOrDefault(majorText, 0);
@@ -190,8 +198,14 @@ namespace FixSourceGenerator.Schema
                 missingAttr = true;
             }
 
-            if (missingAttr || !int.TryParse(numberText, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
+            if (missingAttr)
             {
+                return;
+            }
+
+            if (!int.TryParse(numberText, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
+            {
+                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "field", "number", numberText, "an integer"));
                 return;
             }
 

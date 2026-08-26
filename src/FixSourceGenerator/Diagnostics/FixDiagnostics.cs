@@ -73,5 +73,13 @@ namespace FixSourceGenerator.Diagnostics
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor InvalidAttributeValue = new DiagnosticDescriptor(
+            id: "FIX009",
+            title: "Invalid attribute value",
+            messageFormat: "Element '{0}' has attribute '{1}' with invalid value '{2}'; expected {3}",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
     }
 }

@@ -281,9 +281,10 @@ no mesmo projeto consumidor sem colisão.
 | FIX006 | Warning | Tipo de campo FIX desconhecido → fallback para `string`. |
 | FIX007 | Warning | Grupo sem campo contador `NUMINGROUP` correspondente. |
 | FIX008 | Error | Referência circular de componente (A → B → A). |
+| FIX009 | Error | Valor de atributo inválido (ex. `number`/`major`/`minor` não numérico) — antes descartado silenciosamente. |
 
 IDs FIX001–FIX005 já reservados no esqueleto atual do repositório e mantidos
-semanticamente compatíveis; FIX006–FIX008 são adições deste contrato.
+semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
 
 ## 9. Decisões de escopo confirmadas com o owner
 

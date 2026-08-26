@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="four" minor="4">
+  <header/>
+  <trailer/>
+  <messages/>
+  <components/>
+  <fields/>
+</fix>
