@@ -135,6 +135,15 @@ namespace FixSourceGenerator.Tests
         }
 
         [Fact]
+        public void Reports_invalid_servicepack_attribute_instead_of_silently_defaulting_to_zero()
+        {
+            var (dictionary, diagnostics) = ParseFixture("FIX-invalid-servicepack.xml");
+
+            Assert.NotNull(dictionary);
+            Assert.Contains(diagnostics, d => d.Id == "FIX009");
+        }
+
+        [Fact]
         public void Returns_null_for_malformed_xml()
         {
             var diagnostics = new List<Diagnostic>();

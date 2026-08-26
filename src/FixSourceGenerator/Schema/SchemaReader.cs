@@ -64,9 +64,15 @@ namespace FixSourceGenerator.Schema
                 reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "minor", minorText, "an integer"));
             }
 
+            string? servicePackText = (string?)root.Attribute("servicepack");
+            if (servicePackText != null && !int.TryParse(servicePackText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "servicepack", servicePackText, "an integer"));
+            }
+
             int major = ParseIntOrDefault(majorText, 0);
             int minor = ParseIntOrDefault(minorText, 0);
-            int servicePack = ParseIntOrDefault((string?)root.Attribute("servicepack"), 0);
+            int servicePack = ParseIntOrDefault(servicePackText, 0);
             string fixType = (string?)root.Attribute("type") ?? "FIX";
 
             // ---- Stage 1: <fields> — must exist before anything else can be resolved. ----

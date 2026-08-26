@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4" servicepack="two">
+  <header/>
+  <trailer/>
+  <messages/>
+  <components/>
+  <fields/>
+</fix>
