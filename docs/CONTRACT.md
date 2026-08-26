@@ -113,6 +113,11 @@ completo) e expõe:
   o reader também expõe `bool TryGet{Field}Strict(out {Enum} value)`, que combina a
   leitura com um `{Enum}.IsDefined()` (extension method emitido junto do enum em
   `{Namespace}.Enums.g.cs`, um `switch` allocation-free sobre os membros conhecidos).
+- **Campos `MULTIPLEVALUESTRING`/`MULTIPLECHARVALUE`/`MULTIPLESTRINGVALUE`:** além do span bruto
+  do valor completo (`{Field}` ou `TryGet{Field}`), o reader expõe
+  `{Field}Values` (tipo `FixMultiValueEnumerator`, `ref struct`), um enumerador forward-only que
+  faz split por espaço (ASCII `0x20`) sem copiar/alocar — cada `Current` é uma sub-`ReadOnlySpan<byte>`
+  do span original. Compatível com `foreach` diretamente.
 - **Índice de tags:** para mensagens grandes/com muitos campos fora de ordem, o reader
   pode manter um índice `Span<(int Tag, int Start, int Length)>` **stack-allocated**
   (`stackalloc` ou buffer fornecido pelo chamador) construído em um único scan
@@ -179,7 +184,8 @@ Para cada mensagem, o generator emite um `{Message}Writer` (`ref struct` sobre
 
 | FIX type | C# | Notas |
 |---|---|---|
-| `STRING`, `MULTIPLEVALUESTRING`, `MULTIPLECHARVALUE`, `CURRENCY`, `EXCHANGE`, `COUNTRY`, `LANGUAGE`, `MONTHYEAR`, `XID`, `XIDREF` | `ReadOnlySpan<byte>` (+ `string` sob demanda via `.ToString()`) | Códigos lexicais e listas delimitadas ficam como span bruto em v1 (split/parse tipado é fast-follow). |
+| `STRING`, `CURRENCY`, `EXCHANGE`, `COUNTRY`, `LANGUAGE`, `MONTHYEAR`, `XID`, `XIDREF` | `ReadOnlySpan<byte>` (+ `string` sob demanda via `.ToString()`) | Códigos lexicais ficam como span bruto. |
+| `MULTIPLEVALUESTRING`, `MULTIPLECHARVALUE`, `MULTIPLESTRINGVALUE` | `ReadOnlySpan<byte>` (span bruto do valor completo) **+** `{Field}Values` (`FixMultiValueEnumerator`) | Split tipado, allocation-free, sobre a lista delimitada por espaço — ver §2 "Decode". |
 | `CHAR` | `char` (ou enum gerado, ver §3) | |
 | `INT`, `LENGTH`, `SEQNUM`, `NUMINGROUP`, `DAYOFMONTH`, `TAGNUM` | `int` | Parseado direto do span (`Utf8Parser`/loop de dígitos), sem alocação. |
 | `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, `PERCENTAGE` | `decimal` | **Decisão:** `decimal`, não `double` — evita perda de precisão financeira. Consenso dos 3 modelos. Parse direto de `ReadOnlySpan<byte>` sem `string` intermediário (nativo a partir do .NET 8). |
@@ -313,7 +319,10 @@ semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
 - Implementação completa da composição FIXT1.1 + FIX50SPx (dois arquivos).
 - ~~Validação runtime estrita de domínio de enum~~ — **implementado**: `TryGet{Field}Strict` +
   `{Enum}.IsDefined()` (ver §2 "Decode: reader ref struct").
-- Parsing tipado de `MULTIPLEVALUESTRING`/`MULTIPLECHARVALUE` (hoje span bruto).
+- ~~Parsing tipado de `MULTIPLEVALUESTRING`/`MULTIPLECHARVALUE`~~ — **implementado**:
+  `{Field}Values` retorna um `FixMultiValueEnumerator` (forward-only, allocation-free) sobre os
+  tokens delimitados por espaço; a propriedade/`TryGet{Field}` do span bruto original é mantida
+  (ver §2/§3).
 - Prototipar em #5 a melhor forma de representar "campo ausente" para value types opcionais no reader sem alocar e sem custo de exceção no hot path (`Try{Field}` vs. `Nullable<T>` computado por scan).
 - Avaliar necessidade de índice de tags (`stackalloc (tag, start, length)[]`) vs. scan direto por campo, com benchmarks reais por tipo de mensagem (mensagens pequenas vs. grandes/muitos campos), antes de fixar a estratégia default em #5.
 - Documentar clara e explicitamente para consumidores as limitações de `ref struct` (não pode ser campo de classe, não cruza `await`, não pode ser capturado por closure) — issue #8.

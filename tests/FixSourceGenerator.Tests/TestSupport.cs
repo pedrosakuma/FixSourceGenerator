@@ -56,6 +56,7 @@ internal static class TestSupport
         var price = new FixFieldDef(44, "Price", "PRICE", new List<FixValueDef>());
         var orderQty = new FixFieldDef(38, "OrderQty", "QTY", new List<FixValueDef>());
         var transactTime = new FixFieldDef(60, "TransactTime", "UTCTIMESTAMP", new List<FixValueDef>());
+        var execInst = new FixFieldDef(18, "ExecInst", "MULTIPLEVALUESTRING", new List<FixValueDef>());
 
         var noAllocs = new FixFieldDef(78, "NoAllocs", "NUMINGROUP", new List<FixValueDef>());
         var allocAccount = new FixFieldDef(79, "AllocAccount", "STRING", new List<FixValueDef>());
@@ -95,6 +96,7 @@ internal static class TestSupport
             new FixFieldRef(orderQty, required: true),
             new FixFieldRef(price, required: false),
             new FixFieldRef(transactTime, required: false),
+            new FixFieldRef(execInst, required: false),
             allocsGroup,
         });
 

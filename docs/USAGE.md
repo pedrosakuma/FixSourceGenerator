@@ -89,6 +89,14 @@ if (order.TryGetSideStrict(out var side))
     Console.WriteLine($"Known side: {side}");
 }
 
+// MULTIPLEVALUESTRING/MULTIPLECHARVALUE/MULTIPLESTRINGVALUE: space-delimited token list.
+// The raw span is still available (order.ExecInst / TryGetExecInst), and {Field}Values
+// gives a forward-only, allocation-free enumerator over each token.
+foreach (var token in order.ExecInstValues)
+{
+    Console.WriteLine(Encoding.ASCII.GetString(token));
+}
+
 // Optional value-type field: T? pattern, no allocation.
 if (order.Price is { } price)
 {

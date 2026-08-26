@@ -172,6 +172,24 @@ namespace FixSourceGenerator.Generators
                     EmitScalar(w, prop, tag, required, "global::System.TimeOnly", $"{r}.GetTimeOnly(_buffer, {tag})",
                         $"{r}.TryGetTimeOnly(_buffer, {tag}, out var v) ? v : (global::System.TimeOnly?)null");
                     break;
+
+                case FixTypeCategory.MultiValueChar:
+                case FixTypeCategory.MultiValueString:
+                    // Raw span accessor preserved for callers who want the unsplit wire value
+                    // (e.g. to forward it verbatim), plus a typed, allocation-free enumerator over
+                    // the space-delimited tokens (docs/CONTRACT.md §10 "typed
+                    // MULTIPLEVALUESTRING/MULTIPLECHARVALUE parsing").
+                    if (required)
+                    {
+                        w.Line($"public global::System.ReadOnlySpan<byte> {prop} => {r}.GetField(_buffer, {tag});");
+                    }
+                    else
+                    {
+                        w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) => {r}.TryGetField(_buffer, {tag}, out value);");
+                    }
+
+                    w.Line($"public {_runtimeNs}.FixMultiValueEnumerator {prop}Values => {r}.GetMultiValue(_buffer, {tag});");
+                    break;
             }
         }
 

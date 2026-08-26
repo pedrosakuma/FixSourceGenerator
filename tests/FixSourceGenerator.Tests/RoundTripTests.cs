@@ -37,6 +37,16 @@ public static class FixTestDriver
     }
     public static long ReadTransactTimeTicks(byte[] b) => new NewOrderSingleReader(b).TransactTime!.Value.Ticks;
 
+    public static string[] ReadExecInstValues(byte[] b)
+    {
+        var list = new List<string>();
+        foreach (var token in new NewOrderSingleReader(b).ExecInstValues)
+            list.Add(S(token));
+        return list.ToArray();
+    }
+
+    public static bool ExecInstHasValue(byte[] b) => new NewOrderSingleReader(b).TryGetExecInst(out _);
+
     public static int NoAllocsCount(byte[] b) => new NewOrderSingleReader(b).NoAllocs.Count;
 
     public static string[] ReadAllocAccounts(byte[] b)
@@ -188,6 +198,35 @@ public static class FixTestDriver
         Assert.False(Call<bool>(driver, "SideStrictOk", unknownSide));
         // The plain (non-strict) property still decodes the out-of-domain value rather than throwing.
         Assert.Equal((int)'9', Call<int>(driver, "ReadSideRaw", unknownSide));
+    }
+
+    [Fact]
+    public void MultiValueField_EnumeratesSpaceDelimitedTokens_WithoutAllocatingAnArray()
+    {
+        // Issue: typed MULTIPLEVALUESTRING/MULTIPLECHARVALUE parsing (docs/CONTRACT.md §10) —
+        // {Field}Values exposes a forward-only enumerator over each space-delimited token as a
+        // sub-span, instead of forcing callers to split the raw span themselves.
+        var (_, driver) = Build();
+
+        var buffer = TestSupport.Fix(
+            "8=FIX.4.4", "9=000", "35=D",
+            "11=ORDER1", "54=1", "38=1", "18=2 6 G", "10=000");
+
+        Assert.True(Call<bool>(driver, "ExecInstHasValue", buffer));
+        Assert.Equal(new[] { "2", "6", "G" }, Call<string[]>(driver, "ReadExecInstValues", buffer));
+    }
+
+    [Fact]
+    public void MultiValueField_AbsentField_EnumeratesNoTokens()
+    {
+        var (_, driver) = Build();
+
+        var buffer = TestSupport.Fix(
+            "8=FIX.4.4", "9=000", "35=D",
+            "11=ORDER1", "54=1", "38=1", "10=000");
+
+        Assert.False(Call<bool>(driver, "ExecInstHasValue", buffer));
+        Assert.Empty(Call<string[]>(driver, "ReadExecInstValues", buffer));
     }
 
     [Fact]

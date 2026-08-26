@@ -24,7 +24,11 @@ namespace FixSourceGenerator
         /// <summary>Calendar date only (UTCDATEONLY/LOCALMKTDATE/...).</summary>
         DateOnly,
         /// <summary>Time of day only (UTCTIMEONLY/TIME/...).</summary>
-        TimeOnly
+        TimeOnly,
+        /// <summary>Space-delimited list of single-char tokens (MULTIPLECHARVALUE).</summary>
+        MultiValueChar,
+        /// <summary>Space-delimited list of string tokens (MULTIPLEVALUESTRING/MULTIPLESTRINGVALUE).</summary>
+        MultiValueString
     }
 
     /// <summary>
@@ -72,9 +76,9 @@ namespace FixSourceGenerator
             new Dictionary<string, TranslatedFixType>(StringComparer.OrdinalIgnoreCase)
             {
                 { "STRING", Span() },
-                { "MULTIPLEVALUESTRING", Span() },
-                { "MULTIPLECHARVALUE", Span() },
-                { "MULTIPLESTRINGVALUE", Span() },
+                { "MULTIPLEVALUESTRING", MultiValueString() },
+                { "MULTIPLECHARVALUE", MultiValueChar() },
+                { "MULTIPLESTRINGVALUE", MultiValueString() },
                 { "CURRENCY", Span() },
                 { "EXCHANGE", Span() },
                 { "COUNTRY", Span() },
@@ -132,6 +136,10 @@ namespace FixSourceGenerator
         }
 
         private static TranslatedFixType Span() => new TranslatedFixType(SpanType, FixTypeCategory.Span, true);
+
+        private static TranslatedFixType MultiValueChar() => new TranslatedFixType(SpanType, FixTypeCategory.MultiValueChar, true);
+
+        private static TranslatedFixType MultiValueString() => new TranslatedFixType(SpanType, FixTypeCategory.MultiValueString, true);
 
         private static TranslatedFixType Int() => new TranslatedFixType("int", FixTypeCategory.Int, true);
 

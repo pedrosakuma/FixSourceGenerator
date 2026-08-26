@@ -297,6 +297,17 @@ namespace __NS__.Runtime
             return result;
         }
 
+        /// <summary>
+        /// Returns a forward-only, allocation-free enumerator over a space-delimited
+        /// MULTIPLEVALUESTRING/MULTIPLECHARVALUE/MULTIPLESTRINGVALUE field (e.g. <c>18=A B C</c>),
+        /// splitting on the ASCII space without copying the underlying buffer.
+        /// </summary>
+        public static FixMultiValueEnumerator GetMultiValue(ReadOnlySpan<byte> buffer, int tag)
+        {
+            TryGetField(buffer, tag, out var value);
+            return new FixMultiValueEnumerator(value);
+        }
+
         private static readonly string[] _timestampFormats =
         {
             ""yyyyMMdd-HH:mm:ss.fff"",
@@ -392,6 +403,63 @@ namespace __NS__.Runtime
             }
 
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Forward-only, allocation-free enumerator over a space-delimited MULTIPLEVALUESTRING /
+    /// MULTIPLECHARVALUE / MULTIPLESTRINGVALUE field value, e.g. <c>18=A B C</c>. Each
+    /// <see cref=""Current""/> is a sub-span of the original field value — no split/copy into an
+    /// array/List (docs/CONTRACT.md §10 ""typed MULTIPLEVALUESTRING/MULTIPLECHARVALUE parsing"").
+    /// </summary>
+    public ref struct FixMultiValueEnumerator
+    {
+        private const byte Space = (byte)' ';
+
+        private readonly ReadOnlySpan<byte> _value;
+        private int _position;
+        private ReadOnlySpan<byte> _current;
+
+        public FixMultiValueEnumerator(ReadOnlySpan<byte> value)
+        {
+            _value = value;
+            _position = 0;
+            _current = default;
+        }
+
+        public readonly ReadOnlySpan<byte> Current => _current;
+
+        public readonly FixMultiValueEnumerator GetEnumerator() => this;
+
+        public bool MoveNext()
+        {
+            if (_position > _value.Length)
+            {
+                return false;
+            }
+
+            if (_position == _value.Length)
+            {
+                if (_position == 0 && _value.Length == 0)
+                {
+                    // Empty field value: no tokens at all.
+                    _position = 1;
+                    return false;
+                }
+
+                return false;
+            }
+
+            int start = _position;
+            int end = start;
+            while (end < _value.Length && _value[end] != Space)
+            {
+                end++;
+            }
+
+            _current = _value.Slice(start, end - start);
+            _position = (end < _value.Length) ? end + 1 : end;
+            return true;
         }
     }
 
