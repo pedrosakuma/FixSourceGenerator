@@ -97,6 +97,30 @@ namespace FixSourceGenerator.Generators
                     w.Line($"public {enumName}? {prop} => {r}.{tryGetter}(_buffer, {tag}, out var v) ? ({enumName})v : ({enumName}?)null;");
                 }
 
+                // Strict variant (docs/CONTRACT.md §10 "enum domain validation"): the plain
+                // property above always casts the wire value to the enum, even if it's outside
+                // the schema's known <value> domain (silently producing an "unnamed" enum member).
+                // TryGet{Field}Strict lets callers opt into rejecting out-of-domain values without
+                // paying for a switch/IsDefined check on every read by default.
+                w.Line($"public bool TryGet{prop}Strict(out {enumName} value)");
+                w.Line("{");
+                if (required)
+                {
+                    w.Line($"    value = {prop};");
+                }
+                else
+                {
+                    w.Line($"    if (!{r}.{tryGetter}(_buffer, {tag}, out var v))");
+                    w.Line("    {");
+                    w.Line("        value = default;");
+                    w.Line("        return false;");
+                    w.Line("    }");
+                    w.Line();
+                    w.Line($"    value = ({enumName})v;");
+                }
+                w.Line($"    return value.IsDefined();");
+                w.Line("}");
+
                 return;
             }
 

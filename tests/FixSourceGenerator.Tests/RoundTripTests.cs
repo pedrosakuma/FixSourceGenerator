@@ -24,6 +24,8 @@ public static class FixTestDriver
 
     public static string ReadClOrdID(byte[] b) => S(new NewOrderSingleReader(b).ClOrdID);
     public static bool SideIsBuy(byte[] b) => new NewOrderSingleReader(b).Side == Side.Buy;
+    public static bool SideStrictOk(byte[] b) => new NewOrderSingleReader(b).TryGetSideStrict(out _);
+    public static int ReadSideRaw(byte[] b) => (int)new NewOrderSingleReader(b).Side;
     public static decimal ReadOrderQty(byte[] b) => new NewOrderSingleReader(b).OrderQty;
     public static bool PriceHasValue(byte[] b) => new NewOrderSingleReader(b).Price.HasValue;
     public static decimal ReadPrice(byte[] b) => new NewOrderSingleReader(b).Price!.Value;
@@ -165,6 +167,27 @@ public static class FixTestDriver
         Assert.Equal(2, Call<int>(driver, "NestedCount", buffer, 1));
         Assert.Equal(new[] { "P1" }, Call<string[]>(driver, "NestedPartyIds", buffer, 0));
         Assert.Equal(new[] { "P2", "P3" }, Call<string[]>(driver, "NestedPartyIds", buffer, 1));
+    }
+
+    [Fact]
+    public void TryGetFieldStrict_AcceptsKnownEnumValue_RejectsUnknownOne()
+    {
+        // Issue: enum domain validation (docs/CONTRACT.md §10) — TryGet{Field}Strict lets callers
+        // opt into rejecting a wire value that isn't one of the schema's declared <value>s, unlike
+        // the plain property (which always casts, silently producing an "unnamed" enum member).
+        var (_, driver) = Build();
+
+        var knownSide = TestSupport.Fix(
+            "8=FIX.4.4", "9=000", "35=D",
+            "11=ORDER1", "54=1", "38=1", "10=000");
+        Assert.True(Call<bool>(driver, "SideStrictOk", knownSide));
+
+        var unknownSide = TestSupport.Fix(
+            "8=FIX.4.4", "9=000", "35=D",
+            "11=ORDER2", "54=9", "38=1", "10=000");
+        Assert.False(Call<bool>(driver, "SideStrictOk", unknownSide));
+        // The plain (non-strict) property still decodes the out-of-domain value rather than throwing.
+        Assert.Equal((int)'9', Call<int>(driver, "ReadSideRaw", unknownSide));
     }
 
     [Fact]

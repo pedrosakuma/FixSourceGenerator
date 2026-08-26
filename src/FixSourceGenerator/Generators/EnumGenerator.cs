@@ -19,6 +19,7 @@ namespace FixSourceGenerator.Generators
             w.Open($"public enum {enumName} : int");
 
             var used = new HashSet<string>();
+            var members = new List<string>();
             foreach (var value in field.Values)
             {
                 string member = value.Description.ToIdentifier();
@@ -38,8 +39,34 @@ namespace FixSourceGenerator.Generators
 
                 string literal = isChar ? CharLiteral(value.EnumValue) : value.EnumValue;
                 w.Line($"{member} = {literal},");
+                members.Add(member);
             }
 
+            w.Close();
+
+            EmitIsDefinedExtension(w, enumName, members);
+        }
+
+        /// <summary>
+        /// Emits a <c>static bool {Enum}IsDefined(this {Enum} value)</c> extension so callers can
+        /// validate a decoded wire value against the schema's known <c>&lt;value&gt;</c> domain
+        /// (docs/CONTRACT.md §10 "enum domain validation" fast-follow) without boxing/reflection —
+        /// a plain <c>switch</c> expression over the known members, allocation-free.
+        /// </summary>
+        private static void EmitIsDefinedExtension(CodeWriter w, string enumName, List<string> members)
+        {
+            w.Line();
+            w.Open($"public static class {enumName}Extensions");
+            w.Open($"public static bool IsDefined(this {enumName} value)");
+            w.Line("return value switch");
+            w.Line("{");
+            foreach (var member in members)
+            {
+                w.Line($"    {enumName}.{member} => true,");
+            }
+            w.Line("    _ => false,");
+            w.Line("};");
+            w.Close();
             w.Close();
         }
 

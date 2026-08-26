@@ -105,6 +105,14 @@ completo) e expõe:
   pela pesquisa de viabilidade; é a mesma vantagem que o Artio explora via codegen).
 - **Componentes como sub-reader aninhado** (não uma cópia de dados) — mesma span,
   apenas uma "view" com o subconjunto de campos do componente.
+- **Campos enumerados: `{Field}` (cast direto) + `TryGet{Field}Strict` (validado):** a
+  propriedade simples sempre converte o valor numérico/char decodificado para o enum
+  gerado, mesmo que esteja fora do domínio `<value>` conhecido pelo schema (produzindo
+  um membro "sem nome" com aquele número — comportamento permissivo por padrão, sem
+  custo de validação no hot path). Para quem precisa rejeitar valores fora do domínio,
+  o reader também expõe `bool TryGet{Field}Strict(out {Enum} value)`, que combina a
+  leitura com um `{Enum}.IsDefined()` (extension method emitido junto do enum em
+  `{Namespace}.Enums.g.cs`, um `switch` allocation-free sobre os membros conhecidos).
 - **Índice de tags:** para mensagens grandes/com muitos campos fora de ordem, o reader
   pode manter um índice `Span<(int Tag, int Start, int Length)>` **stack-allocated**
   (`stackalloc` ou buffer fornecido pelo chamador) construído em um único scan
@@ -303,7 +311,8 @@ semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
 
 - Multi-targeting condicional para emitir `DateOnly`/`TimeOnly` (net6+) vs. `DateTime`/`TimeSpan` (netstandard2.0), caso surja demanda por consumidores legados.
 - Implementação completa da composição FIXT1.1 + FIX50SPx (dois arquivos).
-- Validação runtime estrita de domínio de enum (rejeitar valor fora do `<value>` conhecido vs. tolerar).
+- ~~Validação runtime estrita de domínio de enum~~ — **implementado**: `TryGet{Field}Strict` +
+  `{Enum}.IsDefined()` (ver §2 "Decode: reader ref struct").
 - Parsing tipado de `MULTIPLEVALUESTRING`/`MULTIPLECHARVALUE` (hoje span bruto).
 - Prototipar em #5 a melhor forma de representar "campo ausente" para value types opcionais no reader sem alocar e sem custo de exceção no hot path (`Try{Field}` vs. `Nullable<T>` computado por scan).
 - Avaliar necessidade de índice de tags (`stackalloc (tag, start, length)[]`) vs. scan direto por campo, com benchmarks reais por tipo de mensagem (mensagens pequenas vs. grandes/muitos campos), antes de fixar a estratégia default em #5.

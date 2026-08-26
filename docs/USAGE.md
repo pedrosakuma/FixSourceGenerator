@@ -81,6 +81,14 @@ string clOrdId = Encoding.ASCII.GetString(order.ClOrdID); // materialize only if
 bool isBuy = order.Side == Side.Buy;                       // enum comparison, no boxing/lookup
 string symbol = Encoding.ASCII.GetString(order.Instrument.Symbol); // nested component reader
 
+// Enum fields default to a permissive cast: a wire value outside the schema's known <value>
+// domain still decodes into an "unnamed" enum member instead of throwing. To reject unknown
+// values explicitly, use the strict variant instead:
+if (order.TryGetSideStrict(out var side))
+{
+    Console.WriteLine($"Known side: {side}");
+}
+
 // Optional value-type field: T? pattern, no allocation.
 if (order.Price is { } price)
 {
