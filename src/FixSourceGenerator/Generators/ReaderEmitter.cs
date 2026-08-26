@@ -28,12 +28,15 @@ namespace FixSourceGenerator.Generators
 
         public void EmitReader(CodeWriter w, string typeName, IReadOnlyList<FixEntry> entries)
         {
-            w.Open($"public readonly ref struct {typeName}");
-            w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
+            // Mutable ref struct (not readonly): FixSpanReader lazily builds a tag index as
+            // fields are accessed (docs/CONTRACT.md "Índice de tags"), so reading a property can
+            // mutate the underlying reader's internal cache.
+            w.Open($"public ref struct {typeName}");
+            w.Line($"private {_runtimeNs}.FixSpanReader _reader;");
             w.Line();
-            w.Line($"public {typeName}(global::System.ReadOnlySpan<byte> buffer) => _buffer = buffer;");
+            w.Line($"public {typeName}(global::System.ReadOnlySpan<byte> buffer) => _reader = new {_runtimeNs}.FixSpanReader(buffer);");
 
-            var usedNames = new HashSet<string> { "_buffer", typeName };
+            var usedNames = new HashSet<string> { "_reader", typeName };
             var groups = new List<FixGroupRef>();
 
             foreach (var entry in entries)
@@ -80,7 +83,6 @@ namespace FixSourceGenerator.Generators
 
             int tag = field.Number;
             bool required = fieldRef.Required;
-            string r = $"{_runtimeNs}.FixSpanReader";
 
             if (FixEntryHelpers.IsEnumEligible(field))
             {
@@ -90,11 +92,11 @@ namespace FixSourceGenerator.Generators
                 string tryGetter = isChar ? "TryGetByte" : "TryGetInt";
                 if (required)
                 {
-                    w.Line($"public {enumName} {prop} => ({enumName}){r}.{getter}(_buffer, {tag});");
+                    w.Line($"public {enumName} {prop} => ({enumName})_reader.{getter}({tag});");
                 }
                 else
                 {
-                    w.Line($"public {enumName}? {prop} => {r}.{tryGetter}(_buffer, {tag}, out var v) ? ({enumName})v : ({enumName}?)null;");
+                    w.Line($"public {enumName}? {prop} => _reader.{tryGetter}({tag}, out var v) ? ({enumName})v : ({enumName}?)null;");
                 }
 
                 // Strict variant (docs/CONTRACT.md §10 "enum domain validation"): the plain
@@ -110,7 +112,7 @@ namespace FixSourceGenerator.Generators
                 }
                 else
                 {
-                    w.Line($"    if (!{r}.{tryGetter}(_buffer, {tag}, out var v))");
+                    w.Line($"    if (!_reader.{tryGetter}({tag}, out var v))");
                     w.Line("    {");
                     w.Line("        value = default;");
                     w.Line("        return false;");
@@ -129,48 +131,48 @@ namespace FixSourceGenerator.Generators
                 case FixTypeCategory.Span:
                     if (required)
                     {
-                        w.Line($"public global::System.ReadOnlySpan<byte> {prop} => {r}.GetField(_buffer, {tag});");
+                        w.Line($"public global::System.ReadOnlySpan<byte> {prop} => _reader.GetField({tag});");
                     }
                     else
                     {
-                        w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) => {r}.TryGetField(_buffer, {tag}, out value);");
+                        w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) => _reader.TryGetField({tag}, out value);");
                     }
 
                     break;
 
                 case FixTypeCategory.Char:
-                    EmitScalar(w, prop, tag, required, "char", $"(char){r}.GetByte(_buffer, {tag})",
-                        $"{r}.TryGetByte(_buffer, {tag}, out var v) ? (char)v : (char?)null");
+                    EmitScalar(w, prop, tag, required, "char", $"(char)_reader.GetByte({tag})",
+                        $"_reader.TryGetByte({tag}, out var v) ? (char)v : (char?)null");
                     break;
 
                 case FixTypeCategory.Int:
-                    EmitScalar(w, prop, tag, required, "int", $"{r}.GetInt(_buffer, {tag})",
-                        $"{r}.TryGetInt(_buffer, {tag}, out var v) ? v : (int?)null");
+                    EmitScalar(w, prop, tag, required, "int", $"_reader.GetInt({tag})",
+                        $"_reader.TryGetInt({tag}, out var v) ? v : (int?)null");
                     break;
 
                 case FixTypeCategory.Decimal:
-                    EmitScalar(w, prop, tag, required, "decimal", $"{r}.GetDecimal(_buffer, {tag})",
-                        $"{r}.TryGetDecimal(_buffer, {tag}, out var v) ? v : (decimal?)null");
+                    EmitScalar(w, prop, tag, required, "decimal", $"_reader.GetDecimal({tag})",
+                        $"_reader.TryGetDecimal({tag}, out var v) ? v : (decimal?)null");
                     break;
 
                 case FixTypeCategory.Bool:
-                    EmitScalar(w, prop, tag, required, "bool", $"{r}.GetBool(_buffer, {tag})",
-                        $"{r}.TryGetBool(_buffer, {tag}, out var v) ? v : (bool?)null");
+                    EmitScalar(w, prop, tag, required, "bool", $"_reader.GetBool({tag})",
+                        $"_reader.TryGetBool({tag}, out var v) ? v : (bool?)null");
                     break;
 
                 case FixTypeCategory.DateTime:
-                    EmitScalar(w, prop, tag, required, "global::System.DateTime", $"{r}.GetDateTime(_buffer, {tag})",
-                        $"{r}.TryGetDateTime(_buffer, {tag}, out var v) ? v : (global::System.DateTime?)null");
+                    EmitScalar(w, prop, tag, required, "global::System.DateTime", $"_reader.GetDateTime({tag})",
+                        $"_reader.TryGetDateTime({tag}, out var v) ? v : (global::System.DateTime?)null");
                     break;
 
                 case FixTypeCategory.DateOnly:
-                    EmitScalar(w, prop, tag, required, "global::System.DateOnly", $"{r}.GetDateOnly(_buffer, {tag})",
-                        $"{r}.TryGetDateOnly(_buffer, {tag}, out var v) ? v : (global::System.DateOnly?)null");
+                    EmitScalar(w, prop, tag, required, "global::System.DateOnly", $"_reader.GetDateOnly({tag})",
+                        $"_reader.TryGetDateOnly({tag}, out var v) ? v : (global::System.DateOnly?)null");
                     break;
 
                 case FixTypeCategory.TimeOnly:
-                    EmitScalar(w, prop, tag, required, "global::System.TimeOnly", $"{r}.GetTimeOnly(_buffer, {tag})",
-                        $"{r}.TryGetTimeOnly(_buffer, {tag}, out var v) ? v : (global::System.TimeOnly?)null");
+                    EmitScalar(w, prop, tag, required, "global::System.TimeOnly", $"_reader.GetTimeOnly({tag})",
+                        $"_reader.TryGetTimeOnly({tag}, out var v) ? v : (global::System.TimeOnly?)null");
                     break;
 
                 case FixTypeCategory.MultiValueChar:
@@ -181,14 +183,14 @@ namespace FixSourceGenerator.Generators
                     // MULTIPLEVALUESTRING/MULTIPLECHARVALUE parsing").
                     if (required)
                     {
-                        w.Line($"public global::System.ReadOnlySpan<byte> {prop} => {r}.GetField(_buffer, {tag});");
+                        w.Line($"public global::System.ReadOnlySpan<byte> {prop} => _reader.GetField({tag});");
                     }
                     else
                     {
-                        w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) => {r}.TryGetField(_buffer, {tag}, out value);");
+                        w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) => _reader.TryGetField({tag}, out value);");
                     }
 
-                    w.Line($"public {_runtimeNs}.FixMultiValueEnumerator {prop}Values => {r}.GetMultiValue(_buffer, {tag});");
+                    w.Line($"public {_runtimeNs}.FixMultiValueEnumerator {prop}Values => _reader.GetMultiValue({tag});");
                     break;
             }
         }
@@ -214,7 +216,7 @@ namespace FixSourceGenerator.Generators
                 return;
             }
 
-            w.Line($"public {readerType} {prop} => new {readerType}(_buffer);");
+            w.Line($"public {readerType} {prop} => new {readerType}(_reader.Buffer);");
         }
 
         private static void EmitGroupMember(CodeWriter w, FixGroupRef groupRef, HashSet<string> usedNames)
@@ -226,7 +228,7 @@ namespace FixSourceGenerator.Generators
                 return;
             }
 
-            w.Line($"public {readerType} {prop} => new {readerType}(_buffer);");
+            w.Line($"public {readerType} {prop} => new {readerType}(_reader.Buffer);");
         }
 
         public void EmitStandaloneGroupReader(CodeWriter w, FixGroupRef groupRef)
@@ -244,6 +246,9 @@ namespace FixSourceGenerator.Generators
             var entryTags = FixEntryHelpers.FlattenEntryTags(groupRef.Entries);
             string r = $"{_runtimeNs}.FixSpanReader";
 
+            // Kept readonly: the group reader itself only exposes Count and an enumerator; it does
+            // not lazily index fields (each entry gets its own independent FixSpanReader via
+            // EmitReader above), so no mutable state is needed here.
             w.Open($"public readonly ref struct {groupReaderType}");
             w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
             w.Line();
@@ -251,7 +256,7 @@ namespace FixSourceGenerator.Generators
             w.Line();
             w.Line($"public {groupReaderType}(global::System.ReadOnlySpan<byte> buffer) => _buffer = buffer;");
             w.Line();
-            w.Line($"public int Count => {r}.TryGetInt(_buffer, {counterTag}, out var c) ? c : 0;");
+            w.Line($"public int Count => new {r}(_buffer).TryGetInt({counterTag}, out var c) ? c : 0;");
             w.Line();
             w.Line("public Enumerator GetEnumerator() => new Enumerator(_buffer);");
             w.Line();
