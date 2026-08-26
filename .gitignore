@@ -35,3 +35,6 @@ Generated
 
 # macOS
 .DS_Store
+
+# BenchmarkDotNet output
+BenchmarkDotNet.Artifacts/

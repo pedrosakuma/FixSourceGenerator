@@ -11,23 +11,63 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FixSourceGenerator", "src\F
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FixSourceGenerator.Tests", "tests\FixSourceGenerator.Tests\FixSourceGenerator.Tests.csproj", "{FA86CBBC-2212-458C-9B64-70751822D32D}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmarks", "benchmarks", "{66320409-64EC-F7C5-3DEF-65E7510DAAD1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FixSourceGenerator.Benchmarks", "benchmarks\FixSourceGenerator.Benchmarks\FixSourceGenerator.Benchmarks.csproj", "{B98683FD-B30C-4FE7-B40D-45883204883F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
 		Release|Any CPU = Release|Any CPU
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|x64.Build.0 = Debug|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Debug|x86.Build.0 = Debug|Any CPU
 		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|x64.ActiveCfg = Release|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|x64.Build.0 = Release|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|x86.ActiveCfg = Release|Any CPU
+		{B18869DA-FC5E-4970-9292-61A32B89623A}.Release|x86.Build.0 = Release|Any CPU
 		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|x64.Build.0 = Debug|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Debug|x86.Build.0 = Debug|Any CPU
 		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|x64.ActiveCfg = Release|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|x64.Build.0 = Release|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|x86.ActiveCfg = Release|Any CPU
+		{FA86CBBC-2212-458C-9B64-70751822D32D}.Release|x86.Build.0 = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|x64.Build.0 = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Debug|x86.Build.0 = Debug|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x64.ActiveCfg = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x64.Build.0 = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x86.ActiveCfg = Release|Any CPU
+		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{B18869DA-FC5E-4970-9292-61A32B89623A} = {6B4A1AE5-5BC7-4B9B-9F44-0EC8613D955A}
 		{FA86CBBC-2212-458C-9B64-70751822D32D} = {A7BA61C3-81D6-4D58-9070-8922966B5AC4}
+		{B98683FD-B30C-4FE7-B40D-45883204883F} = {66320409-64EC-F7C5-3DEF-65E7510DAAD1}
 	EndGlobalSection
 EndGlobal

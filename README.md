@@ -78,6 +78,9 @@ nested groups) and guidance on versioning schemas over time.
   - `Generators/` — codegen for readers, writers, enums, components, and the embedded runtime.
   - `Diff/` — `SchemaDiffer`, for comparing two dictionary versions and flagging breaking changes.
 - `tests/FixSourceGenerator.Tests` — unit, generator-driver, and real-schema conformance tests.
+- `benchmarks/FixSourceGenerator.Benchmarks` — BenchmarkDotNet CPU/allocation benchmarks for the
+  generated reader/writer (see the benchmarks project's own README for how to run them and the
+  latest recorded numbers).
 - `docs/CONTRACT.md` — the normative design contract for input schema and generated output.
 - `docs/USAGE.md` — getting-started guide, worked example, and schema-versioning guide.
 - `CHANGELOG.md` — release history.
