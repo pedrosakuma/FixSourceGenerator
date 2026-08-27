@@ -2,6 +2,7 @@ using System;
 using System.Text;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Jobs;
+using DotnetDiagnostics.BenchmarkDotNet;
 using FixSourceGenerator.Attributes;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44;
 
@@ -16,7 +17,8 @@ namespace FixSourceGenerator.Benchmarks;
 /// like the full reader always does.
 /// </summary>
 [MemoryDiagnoser]
-[SimpleJob(RuntimeMoniker.Net90)]
+[SimpleJob(RuntimeMoniker.Net10_0)]
+[DotnetDiagnosticsDiagnoser]
 public class FixViewBenchmarks
 {
     // Same wire shape as ReaderWriterBenchmarks (NewOrderSingle + Instrument + NoPartyIDs group),
@@ -73,6 +75,7 @@ public class FixViewBenchmarks
 
     /// <summary>Baseline: the full reader iterating the group, same access pattern as the view below.</summary>
     [Benchmark]
+    [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
     public decimal Decode_FullReader_TwoFields_PlusGroup()
     {
         var reader = new NewOrderSingleReader(Wire);
@@ -94,6 +97,7 @@ public class FixViewBenchmarks
     /// This benchmark exists to confirm that claim empirically, not to show a win.
     /// </summary>
     [Benchmark]
+    [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
     public decimal Decode_FixView_TwoFields_PlusGroup()
     {
         var view = new OrderRoutingWithPartiesView(Wire);

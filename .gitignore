@@ -38,3 +38,6 @@ Generated
 
 # BenchmarkDotNet output
 BenchmarkDotNet.Artifacts/
+
+# Locally downloaded NuGet packages (e.g. dotnet-diagnostics-benchmarkdotnet, not on nuget.org)
+local-packages/
