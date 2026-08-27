@@ -100,7 +100,7 @@ namespace FixSourceGenerator
 
                 var schemaList = schemas
                     .Where(s => s.Schema != null)
-                    .Select(s => (s.Schema!, s.RuntimeNamespace!))
+                    .Select(s => (s.Schema!, s.RuntimeNamespace!, s.Namespace!))
                     .ToList();
 
                 var emittedHintNames = new HashSet<string>(StringComparer.Ordinal);

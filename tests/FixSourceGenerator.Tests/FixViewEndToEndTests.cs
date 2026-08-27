@@ -236,6 +236,128 @@ namespace Acme.Views
         Assert.Contains(result.Diagnostics, d => d.Id == "FIX015");
     }
 
+    private const string GroupConsumerSource = @"
+using FixSourceGenerator.Attributes;
+
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct OrderWithPartiesView
+    {
+        public partial global::System.ReadOnlySpan<byte> ClOrdID { get; }
+        public partial Acme.Fix.V44.NoPartyIDsGroupReader NoPartyIDs { get; }
+    }
+
+    public static class OrderWithPartiesViewTestHarness
+    {
+        public static (byte[] ClOrdId, int PartyCount, byte[] FirstPartyId) Read(byte[] buffer)
+        {
+            var view = new OrderWithPartiesView(buffer);
+            int count = 0;
+            byte[] firstPartyId = System.Array.Empty<byte>();
+            foreach (var party in view.NoPartyIDs)
+            {
+                if (count == 0)
+                {
+                    firstPartyId = party.PartyID.ToArray();
+                }
+
+                count++;
+            }
+
+            return (view.ClOrdID.ToArray(), count, firstPartyId);
+        }
+    }
+}
+";
+
+    [Fact]
+    public void Matches_group_property_by_name_and_exposes_group_reader_type()
+    {
+        var (result, _) = RunGenerator(GroupConsumerSource);
+
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var combinedSource = string.Join("\n", result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SourceText.ToString()));
+        Assert.Contains("NoPartyIDsGroupReader", combinedSource);
+
+        // The group must NOT participate in the scanning constructor's early-exit switch/count —
+        // only ClOrdID (1 field) should be tracked by `remaining`.
+        Assert.Contains("int remaining = 1;", combinedSource);
+    }
+
+    [Fact]
+    public void Generated_view_reads_group_entries_from_a_real_buffer()
+    {
+        var (result, compilation) = RunGenerator(GroupConsumerSource);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+
+        using var ms = new MemoryStream();
+        var emitResult = finalCompilation.Emit(ms);
+        Assert.True(emitResult.Success, string.Join("\n", emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+
+        ms.Seek(0, SeekOrigin.Begin);
+        var assembly = Assembly.Load(ms.ToArray());
+        var harnessType = assembly.GetType("Acme.Views.OrderWithPartiesViewTestHarness")!;
+
+        byte[] buffer = TestSupport.Fix(
+            "11=ABC123", "55=IBM", "54=1", "38=100", "40=2", "44=99.5",
+            "453=2", "448=PARTY-1", "447=1", "452=1", "448=PARTY-2", "447=1", "452=3");
+
+        var readMethod = harnessType.GetMethod("Read")!;
+        var tuple = readMethod.Invoke(null, new object[] { buffer })!;
+        var tupleType = tuple.GetType();
+        var clOrdId = (byte[])tupleType.GetField("Item1")!.GetValue(tuple)!;
+        var partyCount = (int)tupleType.GetField("Item2")!.GetValue(tuple)!;
+        var firstPartyId = (byte[])tupleType.GetField("Item3")!.GetValue(tuple)!;
+
+        Assert.Equal("ABC123", System.Text.Encoding.ASCII.GetString(clOrdId));
+        Assert.Equal(2, partyCount);
+        Assert.Equal("PARTY-1", System.Text.Encoding.ASCII.GetString(firstPartyId));
+    }
+
+    [Fact]
+    public void Reports_FIX014_for_group_property_with_wrong_type()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct BadGroupTypeView
+    {
+        public partial int NoPartyIDs { get; }
+    }
+}
+";
+        var (result, _) = RunGenerator(source);
+        Assert.Contains(result.Diagnostics, d => d.Id == "FIX014");
+    }
+
+    [Fact]
+    public void Reports_FIX015_when_two_properties_target_same_group()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct DuplicateGroupView
+    {
+        public partial Acme.Fix.V44.NoPartyIDsGroupReader NoPartyIDs { get; }
+
+        [FixField(""NoPartyIDs"")]
+        public partial Acme.Fix.V44.NoPartyIDsGroupReader NoPartyIDsAlias { get; }
+    }
+}
+";
+        var (result, _) = RunGenerator(source);
+        Assert.Contains(result.Diagnostics, d => d.Id == "FIX015");
+    }
+
     private sealed class InMemoryAdditionalText : AdditionalText
     {
         private readonly SourceText _text;

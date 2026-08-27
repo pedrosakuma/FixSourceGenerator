@@ -190,17 +190,34 @@ public readonly ref partial struct OrderRoutingView
     public partial ReadOnlySpan<byte> ClOrdID { get; }
     public partial decimal? Price { get; }
     public partial Side Side { get; }
+
+    // Expose an entire repeating group (issue #17): the declared type must be exactly the
+    // {Group}GroupReader the full message reader already generates for this message.
+    public partial NoPartyIDsGroupReader NoPartyIDs { get; }
 }
 
 // ...
 var view = new OrderRoutingView(buffer);
 Console.WriteLine(Encoding.ASCII.GetString(view.ClOrdID));
+foreach (var party in view.NoPartyIDs)
+{
+    Console.WriteLine(Encoding.ASCII.GetString(party.PartyID));
+}
 ```
 
 Every property's declared type must be either the field's native C# type (same mapping as §3 in
 `docs/CONTRACT.md`) or `ReadOnlySpan<byte>` as a raw, no-parse escape hatch; enum-eligible fields
-also accept the generated enum type or its underlying wire type (`byte`/`int`). A mismatch is
-reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
+also accept the generated enum type or its underlying wire type (`byte`/`int`). A property that
+matches a **group** instead of a scalar field must be typed exactly `{Group}GroupReader` — no
+nullable/span variants, since a group always "exists" as a reader (`Count` is simply `0` if
+absent). A mismatch is reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
+
+Groups exposed this way don't participate in the early-exit scan: the property just wraps the
+whole buffer (`new NoPartyIDsGroupReader(_buffer)`), exactly like the full reader does, because
+`{Group}GroupReader` already finds its own counter/entries lazily on access. Fields *inside* a
+group still can't be selected individually — there's no single scalar value to expose for a 0..N
+repetition; declare a second `[FixView]` over the group's own generated entry type if you need
+selective projection there too.
 
 **Requirements:**
 - The struct must be declared `partial` **and** `ref struct` (`FIX011`) — the generated
@@ -212,10 +229,10 @@ reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
 |---|---|
 | FIX010 | `[FixView("X")]`'s message name doesn't match any loaded message. |
 | FIX011 | The `[FixView]` struct isn't declared `partial ref struct`. |
-| FIX012 | A `partial` property doesn't match any field by name (includes a "did you mean" suggestion). |
-| FIX013 | A `[FixField("X")]` override references a field that doesn't exist on the message. |
-| FIX014 | The property's declared type isn't compatible with the field's FIX type. |
-| FIX015 | Two or more properties target the same field (same tag). |
+| FIX012 | A `partial` property doesn't match any field or group by name (includes a "did you mean" suggestion). |
+| FIX013 | A `[FixField("X")]` override references a field or group that doesn't exist on the message. |
+| FIX014 | The property's declared type isn't compatible with the matched field's or group's type. |
+| FIX015 | Two or more properties target the same field or group. |
 
 See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations).
 
