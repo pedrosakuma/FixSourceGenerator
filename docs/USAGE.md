@@ -215,6 +215,7 @@ reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
 | FIX012 | A `partial` property doesn't match any field by name (includes a "did you mean" suggestion). |
 | FIX013 | A `[FixField("X")]` override references a field that doesn't exist on the message. |
 | FIX014 | The property's declared type isn't compatible with the field's FIX type. |
+| FIX015 | Two or more properties target the same field (same tag). |
 
 See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations).
 

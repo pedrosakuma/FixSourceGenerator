@@ -121,5 +121,13 @@ namespace FixSourceGenerator.Diagnostics
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewDuplicateFieldTarget = new DiagnosticDescriptor(
+            id: "FIX015",
+            title: "Multiple FixView properties target the same field",
+            messageFormat: "Property '{0}' targets field '{1}', which is already targeted by property '{2}' on '{3}'",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
     }
 }

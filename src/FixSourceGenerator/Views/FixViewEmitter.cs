@@ -112,6 +112,35 @@ namespace FixSourceGenerator.Views
                 return null;
             }
 
+            // Two properties (e.g. one matched by name, one via a [FixField] override) resolving
+            // to the same field number would otherwise emit two identical `case N:` labels in the
+            // scanning constructor's switch — a C# compile error (CS0152) in the consumer's
+            // project. Report a diagnostic instead of emitting uncompilable code.
+            var seenFieldNumbers = new Dictionary<int, string>();
+            foreach (var slot in slots)
+            {
+                if (seenFieldNumbers.TryGetValue(slot.Field.Number, out var firstPropertyName))
+                {
+                    reportDiagnostic(Diagnostic.Create(
+                        Diagnostics.FixDiagnostics.FixViewDuplicateFieldTarget,
+                        slot.Property.Location,
+                        slot.Property.PropertyName,
+                        slot.Field.Name,
+                        firstPropertyName,
+                        request.StructName));
+                    hadError = true;
+                }
+                else
+                {
+                    seenFieldNumbers[slot.Field.Number] = slot.Property.PropertyName;
+                }
+            }
+
+            if (hadError)
+            {
+                return null;
+            }
+
             string content = EmitStruct(request, message, runtimeNs!, slots);
             string ns = string.IsNullOrEmpty(request.ContainingNamespace) ? string.Empty : request.ContainingNamespace + ".";
             string hintName = $"{ns}{request.StructName}.FixView.g.cs";

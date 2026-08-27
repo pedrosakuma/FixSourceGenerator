@@ -311,9 +311,10 @@ no mesmo projeto consumidor sem colisão.
 | FIX012 | Error | Propriedade `partial` não corresponde a nenhum campo da mensagem (por nome); inclui sugestão "Did you mean" via distância de Levenshtein. |
 | FIX013 | Error | `[FixField("X")]` referencia um campo inexistente na mensagem. |
 | FIX014 | Error | Tipo declarado da propriedade incompatível com o tipo FIX do campo — mensagem lista os tipos aceitos. |
+| FIX015 | Error | Duas ou mais propriedades da view apontam para o mesmo campo (mesmo tag). |
 
 IDs FIX001–FIX005 já reservados no esqueleto atual do repositório e mantidos
-semanticamente compatíveis; FIX006–FIX009 são adições deste contrato; FIX010–FIX014 são do
+semanticamente compatíveis; FIX006–FIX009 são adições deste contrato; FIX010–FIX015 são do
 recurso `[FixView]` (issue #13, ver §11).
 
 ## 9. Decisões de escopo confirmadas com o owner

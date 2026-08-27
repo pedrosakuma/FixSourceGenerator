@@ -215,6 +215,27 @@ namespace Acme.Views
         Assert.Contains(result.Diagnostics, d => d.Id == "FIX014");
     }
 
+    [Fact]
+    public void Reports_FIX015_when_two_properties_target_same_field()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct DuplicateView
+    {
+        public partial global::System.ReadOnlySpan<byte> ClOrdID { get; }
+
+        [FixField(""ClOrdID"")]
+        public partial global::System.ReadOnlySpan<byte> ClOrdIDAlias { get; }
+    }
+}
+";
+        var (result, _) = RunGenerator(source);
+        Assert.Contains(result.Diagnostics, d => d.Id == "FIX015");
+    }
+
     private sealed class InMemoryAdditionalText : AdditionalText
     {
         private readonly SourceText _text;
