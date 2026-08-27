@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <LangVersion>preview</LangVersion>
     <FixGeneratorNamespace>FixSourceGenerator.Benchmarks.Generated</FixGeneratorNamespace>
     <!-- Benchmarks must run Release/optimized code; BenchmarkDotNet also refuses to run
          a Debug build by default. -->
