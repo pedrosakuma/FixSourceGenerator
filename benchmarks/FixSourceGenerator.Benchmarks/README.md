@@ -48,6 +48,28 @@ Takeaways:
   specific capacity-planning decision, and prefer wider/varied message shapes (e.g. the full
   FIX50SP2 fixture) if optimizing for a specific real workload.
 
+### `[FixView]` selective projection vs. the full reader (issue #13)
+
+`FixViewBenchmarks.cs` compares the full `NewOrderSingleReader` against a `[FixView]`-annotated
+`OrderRoutingView` (`ClOrdID` + `Price` only) on the same wire message, both reading only those
+same two fields — isolating the win from the view's early-exit scanning constructor (it stops
+scanning once every requested tag has been found) rather than from "reading fewer fields."
+
+| Method                      | Mean     | Allocated | Ratio vs. full reader |
+|------------------------------|---------:|----------:|-----------------------:|
+| Decode_FullReader_TwoFields  | 169.3 ns |      0 B | 1.00 (baseline)        |
+| Decode_FixView_TwoFields     | 116.1 ns |      0 B | ~0.69 (~31% faster)    |
+
+Takeaways:
+- `[FixView]` is measurably faster than the full reader even on this modest 7-field message —
+  the early-exit stops the scan as soon as `ClOrdID` (tag 11) and `Price` (tag 44) are both found,
+  instead of scanning through `NoPartyIDs`'s repeating group to the end of the buffer.
+- Both remain zero-allocation — `[FixView]` doesn't trade allocations for speed, it's a strict
+  improvement for this access pattern.
+- The gap should widen further on larger messages (e.g. FIX50SP2) where a view requests only a
+  handful of fields out of dozens; this benchmark's `FIX44-mini` fixture is a conservative
+  lower-bound demonstration, not the best case.
+
 ## Investigated and rejected: `IndexOf`-based (SIMD) field scanning
 
 An attempt was made to replace `FixSpanReader.TryReadField`'s manual byte-by-byte scan (for the
