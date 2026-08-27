@@ -81,5 +81,53 @@ namespace FixSourceGenerator.Diagnostics
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewMessageNotFound = new DiagnosticDescriptor(
+            id: "FIX010",
+            title: "FixView target message not found",
+            messageFormat: "[FixView(\"{0}\")] on '{1}' does not match any message in the loaded schema(s)",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewStructMustBePartial = new DiagnosticDescriptor(
+            id: "FIX011",
+            title: "FixView struct must be a partial ref struct",
+            messageFormat: "'{0}' is annotated with [FixView] but is not declared as a 'partial ref struct'",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewPropertyNameMismatch = new DiagnosticDescriptor(
+            id: "FIX012",
+            title: "FixView property does not match any field",
+            messageFormat: "Property '{0}' on '{1}' does not match any field of message '{2}'.{3}",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewFieldOverrideNotFound = new DiagnosticDescriptor(
+            id: "FIX013",
+            title: "[FixField] references an unknown field",
+            messageFormat: "[FixField(\"{0}\")] on property '{1}' does not match any field of message '{2}'",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewIncompatibleType = new DiagnosticDescriptor(
+            id: "FIX014",
+            title: "FixView property type incompatible with field type",
+            messageFormat: "Property '{0}' has type '{1}', which is not compatible with field '{2}' (FIX type '{3}'). Accepted types: {4}",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewDuplicateFieldTarget = new DiagnosticDescriptor(
+            id: "FIX015",
+            title: "Multiple FixView properties target the same field",
+            messageFormat: "Property '{0}' targets field '{1}', which is already targeted by property '{2}' on '{3}'",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
     }
 }
