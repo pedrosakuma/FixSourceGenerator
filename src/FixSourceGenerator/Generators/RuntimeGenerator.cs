@@ -143,48 +143,37 @@ namespace __NS__.Runtime
         public static ReadOnlySpan<byte> GetField(ReadOnlySpan<byte> buffer, int tag)
             => TryGetField(buffer, tag, out var value) ? value : default;
 
+        // --- Pure value-parsing helpers (no tag lookup) -----------------------------------
+        // Used by generated readers, which locate each field's (start, length) via a single
+        // forward scan in the constructor (docs/CONTRACT.md §2 ""scan único, parse sob
+        // demanda""), then parse the already-located span lazily on property access via these
+        // helpers. Kept separate from the buffer+tag lookup helpers below (still used e.g. by
+        // {Group}GroupReader.Count, which reads a single counter field without needing a full
+        // per-entry scan).
+
         public static bool TryParseInt(ReadOnlySpan<byte> value, out int result)
             => Utf8Parser.TryParse(value, out result, out _);
 
-        public static bool TryGetInt(ReadOnlySpan<byte> buffer, int tag, out int result)
+        public static int ParseInt(ReadOnlySpan<byte> value)
         {
-            if (TryGetField(buffer, tag, out var value) && Utf8Parser.TryParse(value, out result, out _))
-            {
-                return true;
-            }
-
-            result = 0;
-            return false;
-        }
-
-        public static int GetInt(ReadOnlySpan<byte> buffer, int tag)
-        {
-            bool ok = TryGetInt(buffer, tag, out int result);
-            Debug.Assert(ok, ""required INT field is absent from the buffer"");
+            bool ok = TryParseInt(value, out int result);
+            Debug.Assert(ok, ""required INT field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetDecimal(ReadOnlySpan<byte> buffer, int tag, out decimal result)
-        {
-            if (TryGetField(buffer, tag, out var value) && Utf8Parser.TryParse(value, out result, out _))
-            {
-                return true;
-            }
+        public static bool TryParseDecimal(ReadOnlySpan<byte> value, out decimal result)
+            => Utf8Parser.TryParse(value, out result, out _);
 
-            result = 0m;
-            return false;
-        }
-
-        public static decimal GetDecimal(ReadOnlySpan<byte> buffer, int tag)
+        public static decimal ParseDecimal(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetDecimal(buffer, tag, out decimal result);
-            Debug.Assert(ok, ""required decimal field is absent from the buffer"");
+            bool ok = TryParseDecimal(value, out decimal result);
+            Debug.Assert(ok, ""required decimal field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetBool(ReadOnlySpan<byte> buffer, int tag, out bool result)
+        public static bool TryParseBool(ReadOnlySpan<byte> value, out bool result)
         {
-            if (TryGetField(buffer, tag, out var value) && value.Length > 0)
+            if (value.Length > 0)
             {
                 result = value[0] == (byte)'Y';
                 return true;
@@ -194,16 +183,16 @@ namespace __NS__.Runtime
             return false;
         }
 
-        public static bool GetBool(ReadOnlySpan<byte> buffer, int tag)
+        public static bool ParseBool(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetBool(buffer, tag, out bool result);
-            Debug.Assert(ok, ""required BOOLEAN field is absent from the buffer"");
+            bool ok = TryParseBool(value, out bool result);
+            Debug.Assert(ok, ""required BOOLEAN field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetByte(ReadOnlySpan<byte> buffer, int tag, out byte result)
+        public static bool TryParseByte(ReadOnlySpan<byte> value, out byte result)
         {
-            if (TryGetField(buffer, tag, out var value) && value.Length > 0)
+            if (value.Length > 0)
             {
                 result = value[0];
                 return true;
@@ -213,16 +202,16 @@ namespace __NS__.Runtime
             return false;
         }
 
-        public static byte GetByte(ReadOnlySpan<byte> buffer, int tag)
+        public static byte ParseByte(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetByte(buffer, tag, out byte result);
-            Debug.Assert(ok, ""required CHAR field is absent from the buffer"");
+            bool ok = TryParseByte(value, out byte result);
+            Debug.Assert(ok, ""required CHAR field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetDateTime(ReadOnlySpan<byte> buffer, int tag, out DateTime result)
+        public static bool TryParseDateTime(ReadOnlySpan<byte> value, out DateTime result)
         {
-            if (TryGetField(buffer, tag, out var value) && value.Length > 0)
+            if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
                 for (int i = 0; i < value.Length; i++)
@@ -242,16 +231,16 @@ namespace __NS__.Runtime
             return false;
         }
 
-        public static DateTime GetDateTime(ReadOnlySpan<byte> buffer, int tag)
+        public static DateTime ParseDateTime(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetDateTime(buffer, tag, out DateTime result);
+            bool ok = TryParseDateTime(value, out DateTime result);
             Debug.Assert(ok, ""required timestamp field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetDateOnly(ReadOnlySpan<byte> buffer, int tag, out DateOnly result)
+        public static bool TryParseDateOnly(ReadOnlySpan<byte> value, out DateOnly result)
         {
-            if (TryGetField(buffer, tag, out var value) && value.Length > 0)
+            if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
                 for (int i = 0; i < value.Length; i++)
@@ -266,16 +255,16 @@ namespace __NS__.Runtime
             return false;
         }
 
-        public static DateOnly GetDateOnly(ReadOnlySpan<byte> buffer, int tag)
+        public static DateOnly ParseDateOnly(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetDateOnly(buffer, tag, out DateOnly result);
+            bool ok = TryParseDateOnly(value, out DateOnly result);
             Debug.Assert(ok, ""required date field is absent or malformed"");
             return result;
         }
 
-        public static bool TryGetTimeOnly(ReadOnlySpan<byte> buffer, int tag, out TimeOnly result)
+        public static bool TryParseTimeOnly(ReadOnlySpan<byte> value, out TimeOnly result)
         {
-            if (TryGetField(buffer, tag, out var value) && value.Length > 0)
+            if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
                 for (int i = 0; i < value.Length; i++)
@@ -290,10 +279,32 @@ namespace __NS__.Runtime
             return false;
         }
 
-        public static TimeOnly GetTimeOnly(ReadOnlySpan<byte> buffer, int tag)
+        public static TimeOnly ParseTimeOnly(ReadOnlySpan<byte> value)
         {
-            bool ok = TryGetTimeOnly(buffer, tag, out TimeOnly result);
+            bool ok = TryParseTimeOnly(value, out TimeOnly result);
             Debug.Assert(ok, ""required time field is absent or malformed"");
+            return result;
+        }
+
+        // --- Buffer+tag lookup helpers (single-field scan-from-zero) -----------------------
+        // Retained for callers that need to look up one field without materializing a full
+        // reader (e.g. {Group}GroupReader.Count, which only ever reads its own counter tag).
+
+        public static bool TryGetInt(ReadOnlySpan<byte> buffer, int tag, out int result)
+        {
+            if (TryGetField(buffer, tag, out var value) && TryParseInt(value, out result))
+            {
+                return true;
+            }
+
+            result = 0;
+            return false;
+        }
+
+        public static int GetInt(ReadOnlySpan<byte> buffer, int tag)
+        {
+            bool ok = TryGetInt(buffer, tag, out int result);
+            Debug.Assert(ok, ""required INT field is absent from the buffer"");
             return result;
         }
 

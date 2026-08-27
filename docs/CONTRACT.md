@@ -83,9 +83,13 @@ Para cada mensagem, o generator emite um `readonly ref struct {Message}Reader` q
 recebe um `ReadOnlySpan<byte>` (o corpo da mensagem já isolado do envelope, ou o buffer
 completo) e expõe:
 
-- **Propriedades por campo, com parsing lazy** — cada acesso faz o scan/parse do valor a
-  partir do span subjacente; nada é pré-materializado no construtor além do índice
-  mínimo necessário para localizar os campos (ver nota sobre índice abaixo).
+- **Propriedades por campo, com localização eager e parsing lazy** — o construtor faz
+  um único scan forward-only do buffer e localiza (sem converter) cada campo declarado
+  no schema deste nível, guardando `(start, length)` em um par de campos privados
+  nomeados por propriedade (não um índice genérico/array/`[InlineArray]`). A
+  conversão de tipo (`decimal`/`DateTime`/enum/etc.) só acontece no getter, sob demanda
+  — campos nunca lidos nunca pagam o custo de parse, mas todos pagam o custo (barato)
+  de localização no scan único do construtor. Ver "Estratégia de leitura" abaixo.
 - **Strings como span por padrão:** `ReadOnlySpan<byte> ClOrdIdBytes` /
   `ReadOnlySpan<char>` via decodificação ASCII sem alocação; um método explícito
   `ToClOrdIdString()` (ou propriedade `string ClOrdId`) aloca sob demanda apenas se
@@ -118,11 +122,17 @@ completo) e expõe:
   `{Field}Values` (tipo `FixMultiValueEnumerator`, `ref struct`), um enumerador forward-only que
   faz split por espaço (ASCII `0x20`) sem copiar/alocar — cada `Current` é uma sub-`ReadOnlySpan<byte>`
   do span original. Compatível com `foreach` diretamente.
-- **Índice de tags:** para mensagens grandes/com muitos campos fora de ordem, o reader
-  pode manter um índice `Span<(int Tag, int Start, int Length)>` **stack-allocated**
-  (`stackalloc` ou buffer fornecido pelo chamador) construído em um único scan
-  forward-only — sem alocação no heap. Mensagens pequenas podem dispensar índice e fazer
-  scan direto por campo.
+- **Índice de tags:** descartado. Após avaliação (issue #12), a estratégia definitiva é
+  **localização eager, parsing lazy**: um único scan forward-only no construtor,
+  guardando `(start, length)` por campo em campos nomeados individualmente (não um
+  array/`[InlineArray]` genérico). Isso evita exigir TFM net8+ (requisito do
+  `[InlineArray]`), mantém o reader `readonly ref struct` sem estado mutável
+  pós-construção, e dá tamanho de struct proporcional apenas aos campos daquele nível
+  (mensagem, componente ou entrada de grupo) — sem capacidade fixa/genérica desperdiçada.
+  Grupos repetidos seguem o mesmo padrão por entrada: cada `{Group}EntryReader` faz seu
+  próprio scan (delimitado ao sub-span da entrada), sem materializar array de entradas
+  (visitadas uma a uma via enumerador forward-only), preservando zero-alloc mesmo para
+  grupos com muitas entradas.
 
 ```csharp
 // Ilustrativo — forma exata definida na issue #5 (codegen)
@@ -323,7 +333,14 @@ semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
   `{Field}Values` retorna um `FixMultiValueEnumerator` (forward-only, allocation-free) sobre os
   tokens delimitados por espaço; a propriedade/`TryGet{Field}` do span bruto original é mantida
   (ver §2/§3).
-- Prototipar em #5 a melhor forma de representar "campo ausente" para value types opcionais no reader sem alocar e sem custo de exceção no hot path (`Try{Field}` vs. `Nullable<T>` computado por scan).
-- Avaliar necessidade de índice de tags (`stackalloc (tag, start, length)[]`) vs. scan direto por campo, com benchmarks reais por tipo de mensagem (mensagens pequenas vs. grandes/muitos campos), antes de fixar a estratégia default em #5.
+- ~~Prototipar melhor forma de representar "campo ausente" para value types opcionais~~ —
+  **implementado**: cada campo opcional guarda um flag `_{campo}Present` além de
+  `Start`/`Length`; a propriedade retorna `T?` (ou `TryGet{Field}` para spans),
+  distinguindo "ausente" de "presente porém vazio".
+- ~~Avaliar necessidade de índice de tags vs. scan direto por campo~~ — **decidido e
+  implementado (issue #12)**: localização eager (scan único no construtor, campos
+  nomeados `Start`/`Length`/`Present`) + parsing lazy (getter converte sob demanda).
+  Descartada a alternativa de índice genérico com `[InlineArray]` (exigiria TFM net8+ e
+  quebraria a premissa `readonly ref struct`); ver §2.
 - Documentar clara e explicitamente para consumidores as limitações de `ref struct` (não pode ser campo de classe, não cruza `await`, não pode ser capturado por closure) — issue #8.
 - Opcionalmente, oferecer uma camada de materialização (DTO alocado) como conveniência **opt-in** para quem precisa reter dados além do tempo de vida do buffer — não bloqueia v1, mas vale registrar como possível fast-follow se houver demanda de ergonomia.
