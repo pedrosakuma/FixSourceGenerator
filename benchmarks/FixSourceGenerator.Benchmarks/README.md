@@ -92,6 +92,44 @@ Takeaways:
   makes the view slower than reading the same group off the full reader, since both use the exact
   same `{Group}GroupReader` and neither one locates the group eagerly.
 
+## CPU hotspot attribution for the `PlusGroup` paths
+
+To find out *where* the time in `Decode_FullReader_TwoFields_PlusGroup` /
+`Decode_FixView_TwoFields_PlusGroup` actually goes (not just the aggregate ns/op above), both
+methods were instrumented with the
+[`dotnet-diagnostics-benchmarkdotnet`](https://github.com/pedrosakuma/dotnet-diagnostics/blob/main/src/DotnetDiagnostics.BenchmarkDotNet/README.md)
+`IDiagnoser` (`[DotnetDiagnosticsDiagnoser]` + `[DiagnosticKind(BenchmarkDiagnosticKind.Cpu,
+DurationSeconds = 8)]`), which attaches an EventPipe CPU sampler to the benchmark's child process
+and reports per-stack-frame exclusive/inclusive sample counts.
+
+> **Note:** this package targets `net10.0` only, which is why this project now targets net10.0
+> (see "How it's wired" above) even though `[FixView]` itself only requires net9+ as a floor. The
+> package isn't published to nuget.org/GitHub Packages — see `nuget.config` and the CI workflow's
+> "Fetch dotnet-diagnostics packages" step for how it's resolved from GitHub Releases. Per the
+> tool's own guidance, treat timings from a `[DotnetDiagnosticsDiagnoser]`-enabled run as
+> diagnostic-only (EventPipe collection adds overhead) — the numbers above, from clean
+> `MemoryDiagnoser`/`SimpleJob` runs, remain the canonical ones.
+
+Findings (8s CPU sample of each method, ~6,100-6,300 samples captured):
+
+| Frame (exclusive samples)                          | FullReader_PlusGroup | FixView_PlusGroup |
+|-----------------------------------------------------|----------------------:|--------------------:|
+| `Decimal.DecCalc.DecAddSub` (parsing `Price`)        | 397 (6.5%)            | 453 (7.2%)           |
+| `Number.TryNumberToDecimal`                          | 58 (0.9%)              | 79 (1.3%)            |
+| `Utf8Parser.TryParseInt32D`                           | 42 (0.7%)              | 58 (0.9%)            |
+| `SpanHelpers.Memmove`                                 | 23 (0.4%)              | 27 (0.4%)            |
+
+The rest (~90%) of samples land inline in the benchmark method itself — the JIT inlines the
+tag/value scanning and group iteration into the benchmark body, so the sampler can't separate
+"group iteration cost" from "field scanning cost" at the frame level; both are fused into one leaf
+frame in both variants.
+
+Takeaway: the dominant *identifiable* cost in both paths is decimal parsing of the `Price` field
+(`DecCalc.DecAddSub`), not the group iteration — and it's present in near-identical proportion in
+both the full reader and the view. This confirms the doc comment on `Decode_FixView_TwoFields_PlusGroup`:
+exposing a group via `[FixView]` doesn't add its own distinguishable overhead relative to the full
+reader's group property, since both share the same `{Group}GroupReader` lazy-scan implementation.
+
 ## Investigated and rejected: `IndexOf`-based (SIMD) field scanning
 
 An attempt was made to replace `FixSpanReader.TryReadField`'s manual byte-by-byte scan (for the

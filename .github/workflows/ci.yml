@@ -15,6 +15,20 @@ jobs:
         with:
           dotnet-version: |
             9.0.x
+            10.0.x
+      - name: Fetch dotnet-diagnostics packages
+        # dotnet-diagnostics-benchmarkdotnet / dotnet-diagnostics-core are not published to any
+        # NuGet feed (nuget.org or GitHub Packages) — only attached as .nupkg assets on GitHub
+        # Releases of pedrosakuma/dotnet-diagnostics. nuget.config points a local folder source
+        # at local-packages/, which is gitignored, so CI must download the assets itself.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p local-packages
+          gh release download v0.24.0 -R pedrosakuma/dotnet-diagnostics \
+            -p "dotnet-diagnostics-benchmarkdotnet.0.24.0.nupkg" \
+            -p "dotnet-diagnostics-core.0.24.0.nupkg" \
+            -D local-packages --clobber
       - name: Restore
         run: dotnet restore FixSourceGenerator.sln
       - name: Build

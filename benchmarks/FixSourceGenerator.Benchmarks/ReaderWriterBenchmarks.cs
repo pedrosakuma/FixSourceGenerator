@@ -16,7 +16,7 @@ namespace FixSourceGenerator.Benchmarks;
 /// never as a target the generator itself depends on.
 /// </summary>
 [MemoryDiagnoser]
-[SimpleJob(RuntimeMoniker.Net90)]
+[SimpleJob(RuntimeMoniker.Net10_0)]
 public class ReaderWriterBenchmarks
 {
     // 8=FIX.4.4|9=...|35=D|49=SENDER|56=TARGET|34=7|52=20240115-10:30:05.000|
