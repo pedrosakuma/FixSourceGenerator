@@ -112,5 +112,21 @@ namespace FixSourceGenerator.Views
         {
             return accepted.Contains(Normalize(declaredTypeText));
         }
+
+        /// <summary>
+        /// Whether a declared property type matches the given group's reader type (issue #17):
+        /// exactly <c>{RuntimeNamespace}.{GroupName}GroupReader</c>, normalized so
+        /// <c>global::</c>/fully-qualified and bare spellings both compare equal. Unlike scalar
+        /// fields, a group has no nullable/span escape hatch — it always "exists" as a reader
+        /// (an absent group simply has <c>Count == 0</c>).
+        /// </summary>
+        public static bool IsGroupTypeCompatible(string declaredTypeText, string runtimeNamespace, string groupName)
+        {
+            string expected = Normalize($"{runtimeNamespace}.{groupName.ToIdentifier()}GroupReader");
+            return Normalize(declaredTypeText) == expected;
+        }
+
+        /// <summary>The human-readable expected type name for a group property, used in FIX014's message.</summary>
+        public static string GroupReaderDisplayName(string groupName) => groupName.ToIdentifier() + "GroupReader";
     }
 }

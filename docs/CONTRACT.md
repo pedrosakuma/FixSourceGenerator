@@ -373,6 +373,10 @@ public readonly ref partial struct OrderRoutingView
 
     [FixField("Side")]
     public partial byte RawSide { get; } // escape hatch: valor bruto sem parse do enum
+
+    // Expor um grupo repetido inteiro (issue #17): tipo deve ser exatamente o
+    // {Group}GroupReader já emitido para o reader completo desta mensagem.
+    public partial NoPartyIDsGroupReader NoPartyIDs { get; }
 }
 
 var view = new OrderRoutingView(buffer);
@@ -381,7 +385,19 @@ var view = new OrderRoutingView(buffer);
 Matriz de compatibilidade de tipos (regra do "escape hatch"): toda categoria FIX aceita seu tipo
 C# nativo (mesma tabela do §3) **e** `ReadOnlySpan<byte>` como escape hatch bruto/sem parse; campos
 enum-eligible (§3) adicionalmente aceitam o tipo enum gerado e seu tipo subjacente (`byte` para
-CHAR, `int` para INT). Qualquer outro tipo declarado é rejeitado com FIX014 (ver §8).
+CHAR, `int` para INT). Uma propriedade que casa com um **grupo** (não um campo escalar) deve ter
+tipo exatamente `{Group}GroupReader` — sem variantes nullable/span, já que um grupo sempre "existe"
+como reader (`Count` pode ser 0 se ausente). Qualquer outro tipo declarado é rejeitado com FIX014
+(ver §8).
+
+Grupos como propriedade (issue #17): o construtor de scan early-exit **não** rastreia grupos — a
+propriedade apenas envolve o buffer inteiro com `new {Group}GroupReader(_buffer)`, igual ao reader
+completo faz. Isso é possível porque `{Group}GroupReader`/`FixGroupEnumerator` já fazem sua própria
+busca preguiçosa pelo counter/entradas sob demanda (§2/§6); a view não precisa localizar o grupo
+antecipadamente, então ele não conta para o `remaining` do early-exit nem aparece no `switch` da
+scan. Campos individuais **dentro** de um grupo continuam fora de escopo — não há valor escalar
+único a expor para uma repetição 0..N; use uma segunda `[FixView]` sobre o tipo de entrada gerado
+pelo próprio reader completo, se precisar de projeção seletiva também dentro do grupo.
 
 Requisitos e limitações (v1):
 - A struct anotada deve ser `partial ref struct` (FIX011) — a implementação armazena um campo
@@ -390,7 +406,8 @@ Requisitos e limitações (v1):
   do gerador (readers/writers só exigem net6+, §4). Se o consumidor não puder subir para net9+,
   use o reader completo (§2) em vez de `[FixView]`.
 - Um `[FixView]` = uma mensagem (`MsgType`); não há views multi-mensagem.
-- Grupos não são "achatados" para dentro de uma view em v1 — fora de escopo.
+- Campos individuais dentro de um grupo não são "achatados" para dentro de uma view — fora de
+  escopo (issue #17 só permite expor o grupo inteiro via seu `{Group}GroupReader`).
 - A resolução de tipo é feita por comparação **textual** do tipo declarado (não por
   `ITypeSymbol` resolvido), porque um tipo enum gerado pelo próprio generator nessa mesma
   passagem incremental ainda não existe como metadata resolvível — casar pelo texto evita esse

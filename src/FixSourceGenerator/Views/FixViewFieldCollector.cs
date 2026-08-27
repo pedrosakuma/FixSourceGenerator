@@ -3,7 +3,7 @@ using FixSourceGenerator.Schema;
 
 namespace FixSourceGenerator.Views
 {
-    /// <summary>Flattens the fields directly reachable from a message's own entries plus its components (mirrors <see cref="Generators.FixEntryHelpers"/>'s traversal, but keyed by field name for FixView matching). Groups are intentionally NOT flattened — a view can't select individual group fields in v1 (issue #13, out of scope).</summary>
+    /// <summary>Flattens the fields directly reachable from a message's own entries plus its components (mirrors <see cref="Generators.FixEntryHelpers"/>'s traversal, but keyed by field name for FixView matching). A group's own *entries* are intentionally NOT flattened into scalar fields — a view can't select individual fields nested inside a group (out of scope, no single scalar value to expose for a 0..N repetition) — but the group itself can be exposed as a whole via <see cref="CollectGroups"/> (issue #17).</summary>
     internal static class FixViewFieldCollector
     {
         public static void Collect(IReadOnlyList<FixEntry> entries, Dictionary<string, (FixFieldDef Field, bool Required)> into)
@@ -22,7 +22,28 @@ namespace FixSourceGenerator.Views
                     case FixComponentRef componentRef:
                         Collect(componentRef.Component.Entries, into);
                         break;
-                    // FixGroupRef: not flattened — out of scope for v1 (issue #13).
+                    // FixGroupRef: not flattened into scalar fields here — see CollectGroups.
+                }
+            }
+        }
+
+        /// <summary>Collects the groups directly reachable from a message's own entries plus its components, keyed by group name, for exposing a whole group as a <c>[FixView]</c> property (issue #17). Groups nested inside other groups are NOT collected — a view targets a single message level, matching how the full reader only exposes its own level's groups.</summary>
+        public static void CollectGroups(IReadOnlyList<FixEntry> entries, Dictionary<string, FixGroupRef> into)
+        {
+            foreach (var entry in entries)
+            {
+                switch (entry)
+                {
+                    case FixGroupRef groupRef:
+                        if (!into.ContainsKey(groupRef.Name))
+                        {
+                            into[groupRef.Name] = groupRef;
+                        }
+
+                        break;
+                    case FixComponentRef componentRef:
+                        CollectGroups(componentRef.Component.Entries, into);
+                        break;
                 }
             }
         }

@@ -16,7 +16,7 @@ namespace FixSourceGenerator.Views
     {
         public static (string HintName, string Content)? Generate(
             FixViewRequest request,
-            IReadOnlyList<(FixDictionary Schema, string RuntimeNamespace)> schemas,
+            IReadOnlyList<(FixDictionary Schema, string RuntimeNamespace, string Namespace)> schemas,
             Action<Diagnostic> reportDiagnostic)
         {
             if (!request.IsPartial || !request.IsRefStruct)
@@ -30,18 +30,20 @@ namespace FixSourceGenerator.Views
 
             FixMessageDef? message = null;
             string? runtimeNs = null;
-            foreach (var (schema, schemaRuntimeNs) in schemas)
+            string? schemaNs = null;
+            foreach (var (schema, schemaRuntimeNs, schemaNamespace) in schemas)
             {
                 var match = schema.Messages.FirstOrDefault(m => string.Equals(m.Name, request.MessageName, StringComparison.Ordinal));
                 if (match != null)
                 {
                     message = match;
                     runtimeNs = schemaRuntimeNs;
+                    schemaNs = schemaNamespace;
                     break;
                 }
             }
 
-            if (message == null || runtimeNs == null)
+            if (message == null || runtimeNs == null || schemaNs == null)
             {
                 reportDiagnostic(Diagnostic.Create(
                     Diagnostics.FixDiagnostics.FixViewMessageNotFound,
@@ -54,12 +56,36 @@ namespace FixSourceGenerator.Views
             var fieldsByName = new Dictionary<string, (FixFieldDef Field, bool Required)>(StringComparer.Ordinal);
             FixViewFieldCollector.Collect(message.Entries, fieldsByName);
 
+            var groupsByName = new Dictionary<string, FixGroupRef>(StringComparer.Ordinal);
+            FixViewFieldCollector.CollectGroups(message.Entries, groupsByName);
+
             var slots = new List<(FixViewPropertyModel Property, FixFieldDef Field, bool Required)>();
+            var groupSlots = new List<(FixViewPropertyModel Property, FixGroupRef Group)>();
             bool hadError = false;
 
             foreach (var property in request.Properties)
             {
                 string lookupName = property.FieldNameOverride ?? property.PropertyName;
+
+                if (groupsByName.TryGetValue(lookupName, out var groupMatch))
+                {
+                    if (!FixViewTypeCompatibility.IsGroupTypeCompatible(property.DeclaredTypeText, schemaNs!, groupMatch.Name))
+                    {
+                        reportDiagnostic(Diagnostic.Create(
+                            Diagnostics.FixDiagnostics.FixViewIncompatibleType,
+                            property.Location,
+                            property.PropertyName,
+                            property.DeclaredTypeText,
+                            groupMatch.Name,
+                            "group",
+                            FixViewTypeCompatibility.GroupReaderDisplayName(groupMatch.Name)));
+                        hadError = true;
+                        continue;
+                    }
+
+                    groupSlots.Add((property, groupMatch));
+                    continue;
+                }
 
                 if (!fieldsByName.TryGetValue(lookupName, out var match))
                 {
@@ -74,7 +100,8 @@ namespace FixSourceGenerator.Views
                     }
                     else
                     {
-                        string? suggestion = FixViewFieldCollector.FindClosest(lookupName, fieldsByName.Keys);
+                        var candidates = fieldsByName.Keys.Concat(groupsByName.Keys);
+                        string? suggestion = FixViewFieldCollector.FindClosest(lookupName, candidates);
                         string suggestionText = suggestion != null ? $" Did you mean '{suggestion}'?" : string.Empty;
                         reportDiagnostic(Diagnostic.Create(
                             Diagnostics.FixDiagnostics.FixViewPropertyNameMismatch,
@@ -136,12 +163,35 @@ namespace FixSourceGenerator.Views
                 }
             }
 
+            // Same duplicate-target guard for groups: two properties can't both expose the same
+            // group's reader (would emit two identically-typed properties returning the same
+            // GroupReader — not a compile error by itself, but a confusing/pointless duplicate).
+            var seenGroupNames = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var groupSlot in groupSlots)
+            {
+                if (seenGroupNames.TryGetValue(groupSlot.Group.Name, out var firstPropertyName))
+                {
+                    reportDiagnostic(Diagnostic.Create(
+                        Diagnostics.FixDiagnostics.FixViewDuplicateFieldTarget,
+                        groupSlot.Property.Location,
+                        groupSlot.Property.PropertyName,
+                        groupSlot.Group.Name,
+                        firstPropertyName,
+                        request.StructName));
+                    hadError = true;
+                }
+                else
+                {
+                    seenGroupNames[groupSlot.Group.Name] = groupSlot.Property.PropertyName;
+                }
+            }
+
             if (hadError)
             {
                 return null;
             }
 
-            string content = EmitStruct(request, message, runtimeNs!, slots);
+            string content = EmitStruct(request, message, runtimeNs!, schemaNs!, slots, groupSlots);
             string ns = string.IsNullOrEmpty(request.ContainingNamespace) ? string.Empty : request.ContainingNamespace + ".";
             string hintName = $"{ns}{request.StructName}.FixView.g.cs";
             return (hintName, content);
@@ -151,7 +201,9 @@ namespace FixSourceGenerator.Views
             FixViewRequest request,
             FixMessageDef message,
             string runtimeNs,
-            List<(FixViewPropertyModel Property, FixFieldDef Field, bool Required)> slots)
+            string schemaNs,
+            List<(FixViewPropertyModel Property, FixFieldDef Field, bool Required)> slots,
+            List<(FixViewPropertyModel Property, FixGroupRef Group)> groupSlots)
         {
             var w = new CodeWriter();
             w.Line("// <auto-generated/>");
@@ -230,6 +282,12 @@ namespace FixSourceGenerator.Views
                 EmitPropertyImpl(w, runtimeNs, slot.Property, slot.Field, slot.Required);
             }
 
+            foreach (var groupSlot in groupSlots)
+            {
+                w.Line();
+                EmitGroupPropertyImpl(w, schemaNs, groupSlot.Property, groupSlot.Group);
+            }
+
             w.Close(); // struct
 
             if (hasNamespace)
@@ -238,6 +296,20 @@ namespace FixSourceGenerator.Views
             }
 
             return w.ToString();
+        }
+
+        /// <summary>
+        /// Exposes a whole repeating group via the same <c>{Group}GroupReader</c> type the full
+        /// message reader already emits for this message (issue #17). No Start/Length/Present
+        /// slot is needed — like the full reader's own group property, this simply wraps the
+        /// entire buffer; the group reader's own lazy scan (via <c>FixGroupEnumerator</c>) finds
+        /// the counter/entries on demand. This is why groups don't participate in the scanning
+        /// constructor's early-exit switch/`remaining` count above.
+        /// </summary>
+        private static void EmitGroupPropertyImpl(CodeWriter w, string schemaNs, FixViewPropertyModel property, FixGroupRef group)
+        {
+            string groupReaderType = $"{schemaNs}.{group.Name.ToIdentifier()}GroupReader";
+            w.Line($"public partial {groupReaderType} {property.PropertyName} {{ get => new {groupReaderType}(_buffer); }}");
         }
 
         private static void EmitPropertyImpl(CodeWriter w, string runtimeNs, FixViewPropertyModel property, FixFieldDef field, bool required)
