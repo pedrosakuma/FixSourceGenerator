@@ -306,9 +306,15 @@ no mesmo projeto consumidor sem colisão.
 | FIX007 | Warning | Grupo sem campo contador `NUMINGROUP` correspondente. |
 | FIX008 | Error | Referência circular de componente (A → B → A). |
 | FIX009 | Error | Valor de atributo inválido (ex. `number`/`major`/`minor`/`servicepack` não numérico) — antes descartado silenciosamente. |
+| FIX010 | Error | `[FixView("Msg")]` não corresponde a nenhuma mensagem carregada. |
+| FIX011 | Error | Struct anotada com `[FixView]` não é `partial ref struct`. |
+| FIX012 | Error | Propriedade `partial` não corresponde a nenhum campo da mensagem (por nome); inclui sugestão "Did you mean" via distância de Levenshtein. |
+| FIX013 | Error | `[FixField("X")]` referencia um campo inexistente na mensagem. |
+| FIX014 | Error | Tipo declarado da propriedade incompatível com o tipo FIX do campo — mensagem lista os tipos aceitos. |
 
 IDs FIX001–FIX005 já reservados no esqueleto atual do repositório e mantidos
-semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
+semanticamente compatíveis; FIX006–FIX009 são adições deste contrato; FIX010–FIX014 são do
+recurso `[FixView]` (issue #13, ver §11).
 
 ## 9. Decisões de escopo confirmadas com o owner
 
@@ -344,3 +350,47 @@ semanticamente compatíveis; FIX006–FIX009 são adições deste contrato.
   quebraria a premissa `readonly ref struct`); ver §2.
 - Documentar clara e explicitamente para consumidores as limitações de `ref struct` (não pode ser campo de classe, não cruza `await`, não pode ser capturado por closure) — issue #8.
 - Opcionalmente, oferecer uma camada de materialização (DTO alocado) como conveniência **opt-in** para quem precisa reter dados além do tempo de vida do buffer — não bloqueia v1, mas vale registrar como possível fast-follow se houver demanda de ergonomia.
+
+## 11. `[FixView]` — projeção seletiva de campos (issue #13)
+
+Motivação: um reader completo (§2) localiza todos os campos da mensagem no scan do construtor,
+mesmo quando o consumidor só lê 2-3 tags de uma mensagem com dezenas/centenas de campos. `[FixView]`
+permite declarar, do lado do consumidor, uma `partial ref struct` anotada com os campos de
+interesse; o generator casa cada propriedade `partial` com um campo da mensagem-alvo (por nome, ou
+por `[FixField("...")]` quando o nome diverge) e emite um construtor de scan único **com
+early-exit**: a varredura para assim que todas as N tags pedidas já foram localizadas — diferente
+do reader completo (§2), que não pode saber antecipadamente quantos campos possui.
+
+```csharp
+using FixSourceGenerator.Attributes;
+
+[FixView("NewOrderSingle")]
+public readonly ref partial struct OrderRoutingView
+{
+    public partial ReadOnlySpan<byte> ClOrdID { get; }
+    public partial decimal? Price { get; }
+
+    [FixField("Side")]
+    public partial byte RawSide { get; } // escape hatch: valor bruto sem parse do enum
+}
+
+var view = new OrderRoutingView(buffer);
+```
+
+Matriz de compatibilidade de tipos (regra do "escape hatch"): toda categoria FIX aceita seu tipo
+C# nativo (mesma tabela do §3) **e** `ReadOnlySpan<byte>` como escape hatch bruto/sem parse; campos
+enum-eligible (§3) adicionalmente aceitam o tipo enum gerado e seu tipo subjacente (`byte` para
+CHAR, `int` para INT). Qualquer outro tipo declarado é rejeitado com FIX014 (ver §8).
+
+Requisitos e limitações (v1):
+- A struct anotada deve ser `partial ref struct` (FIX011) — a implementação armazena um campo
+  `ReadOnlySpan<byte> _buffer`, então não pode ser uma struct comum.
+- **Exige C# 13 / SDK net9+ do lado do consumidor** (propriedades `partial`), diferente do resto
+  do gerador (readers/writers só exigem net6+, §4). Se o consumidor não puder subir para net9+,
+  use o reader completo (§2) em vez de `[FixView]`.
+- Um `[FixView]` = uma mensagem (`MsgType`); não há views multi-mensagem.
+- Grupos não são "achatados" para dentro de uma view em v1 — fora de escopo.
+- A resolução de tipo é feita por comparação **textual** do tipo declarado (não por
+  `ITypeSymbol` resolvido), porque um tipo enum gerado pelo próprio generator nessa mesma
+  passagem incremental ainda não existe como metadata resolvível — casar pelo texto evita esse
+  problema de auto-referência.

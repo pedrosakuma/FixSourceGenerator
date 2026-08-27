@@ -171,6 +171,53 @@ diagnostic (no build break unless the descriptor's severity is `Error`):
 
 See `docs/CONTRACT.md` §8 for full descriptions and `AnalyzerReleases.Shipped.md` for severities.
 
+## 5.1. Selective projection with `[FixView]`
+
+When you only need a handful of fields from a message (not the full reader), annotate your own
+`partial ref struct` with `[FixView("MessageName")]` and declare a `partial` property per field
+you're interested in. The generator matches each property against the target message's fields —
+by property name, or via `[FixField("...")]` when the names diverge — and emits the missing
+property bodies plus a single scanning constructor that **stops early** once every requested tag
+has been located (unlike the full reader, which always scans everything it declares).
+
+```csharp
+using FixSourceGenerator.Attributes;
+using Acme.Fix.V44; // for the Side enum, if you want the typed variant
+
+[FixView("NewOrderSingle")]
+public readonly ref partial struct OrderRoutingView
+{
+    public partial ReadOnlySpan<byte> ClOrdID { get; }
+    public partial decimal? Price { get; }
+    public partial Side Side { get; }
+}
+
+// ...
+var view = new OrderRoutingView(buffer);
+Console.WriteLine(Encoding.ASCII.GetString(view.ClOrdID));
+```
+
+Every property's declared type must be either the field's native C# type (same mapping as §3 in
+`docs/CONTRACT.md`) or `ReadOnlySpan<byte>` as a raw, no-parse escape hatch; enum-eligible fields
+also accept the generated enum type or its underlying wire type (`byte`/`int`). A mismatch is
+reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
+
+**Requirements:**
+- The struct must be declared `partial` **and** `ref struct` (`FIX011`) — the generated
+  implementation holds a `ReadOnlySpan<byte>` field internally.
+- **Requires the consuming project to target C# 13 / a net9+-era SDK**, since partial properties
+  are a C# 13 feature. This is stricter than the rest of the generator (readers/writers only need
+  net6+, see §2) — if you can't upgrade, use the full message reader instead.
+| ID | Meaning |
+|---|---|
+| FIX010 | `[FixView("X")]`'s message name doesn't match any loaded message. |
+| FIX011 | The `[FixView]` struct isn't declared `partial ref struct`. |
+| FIX012 | A `partial` property doesn't match any field by name (includes a "did you mean" suggestion). |
+| FIX013 | A `[FixField("X")]` override references a field that doesn't exist on the message. |
+| FIX014 | The property's declared type isn't compatible with the field's FIX type. |
+
+See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations).
+
 ## 6. Versioning schemas over time
 
 A few practices for evolving your schema(s) safely as your counterparty's dictionary changes or
