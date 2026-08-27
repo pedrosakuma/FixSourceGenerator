@@ -70,6 +70,42 @@ public class FixViewBenchmarks
         total += view.Price ?? 0m;
         return total;
     }
+
+    /// <summary>Baseline: the full reader iterating the group, same access pattern as the view below.</summary>
+    [Benchmark]
+    public decimal Decode_FullReader_TwoFields_PlusGroup()
+    {
+        var reader = new NewOrderSingleReader(Wire);
+        decimal total = reader.ClOrdID.Length;
+        total += reader.Price ?? 0m;
+        foreach (var party in reader.NoPartyIDs)
+        {
+            total += party.PartyRole ?? 0;
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// [FixView] exposing the group as a typed property (issue #17), alongside the same 2 scalar
+    /// fields. Expected to be roughly on par with (not faster than) the full reader here: the
+    /// group property isn't part of the early-exit scan — it's a lazy wrapper over the whole
+    /// buffer either way, in both the view and the full reader (see FixViewEmitter.EmitGroupPropertyImpl).
+    /// This benchmark exists to confirm that claim empirically, not to show a win.
+    /// </summary>
+    [Benchmark]
+    public decimal Decode_FixView_TwoFields_PlusGroup()
+    {
+        var view = new OrderRoutingWithPartiesView(Wire);
+        decimal total = view.ClOrdID.Length;
+        total += view.Price ?? 0m;
+        foreach (var party in view.NoPartyIDs)
+        {
+            total += party.PartyRole ?? 0;
+        }
+
+        return total;
+    }
 }
 
 [FixView("NewOrderSingle")]
@@ -77,4 +113,12 @@ public readonly ref partial struct OrderRoutingView
 {
     public partial ReadOnlySpan<byte> ClOrdID { get; }
     public partial decimal? Price { get; }
+}
+
+[FixView("NewOrderSingle")]
+public readonly ref partial struct OrderRoutingWithPartiesView
+{
+    public partial ReadOnlySpan<byte> ClOrdID { get; }
+    public partial decimal? Price { get; }
+    public partial FixSourceGenerator.Benchmarks.Generated.Fix.V44.NoPartyIDsGroupReader NoPartyIDs { get; }
 }

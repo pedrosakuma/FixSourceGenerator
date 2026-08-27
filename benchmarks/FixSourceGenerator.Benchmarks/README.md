@@ -70,6 +70,28 @@ Takeaways:
   handful of fields out of dozens; this benchmark's `FIX44-mini` fixture is a conservative
   lower-bound demonstration, not the best case.
 
+### `[FixView]` with a group property exposed (issue #17)
+
+Issue #17 lets a `[FixView]` property expose a whole repeating group via the same
+`{Group}GroupReader` the full reader already generates, deliberately *outside* the early-exit
+scan (the group reader does its own lazy scan on access, same as the full reader's group
+property). `Decode_*_PlusGroup` re-runs the same 2-field comparison but also iterates
+`NoPartyIDs`, to confirm the group's presence doesn't erase the view's early-exit advantage.
+
+| Method                                 | Mean     | Allocated | Ratio vs. matching full reader |
+|-----------------------------------------|---------:|----------:|--------------------------------:|
+| Decode_FullReader_TwoFields_PlusGroup   | 510.2 ns |      0 B | 1.00 (baseline)                |
+| Decode_FixView_TwoFields_PlusGroup      | 429.2 ns |      0 B | ~0.84 (~16% faster)             |
+
+Takeaways:
+- The view is still faster with the group exposed (~16%), though the gap is narrower than the
+  scalar-only case (~31%) — the group's own lazy scan (shared cost in both variants) now dominates
+  more of the total time, diluting the relative weight of the early-exit's savings on the 2 scalar
+  fields.
+- Both remain zero-allocation. Exposing a group via `[FixView]` is a "free" convenience — it never
+  makes the view slower than reading the same group off the full reader, since both use the exact
+  same `{Group}GroupReader` and neither one locates the group eagerly.
+
 ## Investigated and rejected: `IndexOf`-based (SIMD) field scanning
 
 An attempt was made to replace `FixSpanReader.TryReadField`'s manual byte-by-byte scan (for the
