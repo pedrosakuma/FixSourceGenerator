@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for NuGet Trusted Publishing (OIDC)
+      contents: write    # required to attach artifacts to the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+
+      - name: Fetch dotnet-diagnostics packages
+        # dotnet-diagnostics-benchmarkdotnet / dotnet-diagnostics-core are not published to any
+        # NuGet feed (nuget.org or GitHub Packages) — only attached as .nupkg assets on GitHub
+        # Releases of pedrosakuma/dotnet-diagnostics. nuget.config points a local folder source
+        # at local-packages/, which is gitignored, so CI must download the assets itself.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p local-packages
+          gh release download v0.24.0 -R pedrosakuma/dotnet-diagnostics \
+            -p "dotnet-diagnostics-benchmarkdotnet.0.24.0.nupkg" \
+            -p "dotnet-diagnostics-core.0.24.0.nupkg" \
+            -D local-packages --clobber
+
+      - name: Restore
+        run: dotnet restore FixSourceGenerator.sln
+
+      - name: Build
+        run: dotnet build FixSourceGenerator.sln --no-restore -c Release
+
+      - name: Test
+        run: dotnet test FixSourceGenerator.sln --no-build -c Release
+
+      - name: Derive package version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Pack
+        run: |
+          dotnet pack src/FixSourceGenerator/FixSourceGenerator.csproj \
+            -c Release --no-build \
+            -p:PackageVersion=${{ steps.version.outputs.version }} \
+            -o out
+
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: pedrosakuma
+
+      - name: Push to NuGet.org
+        run: |
+          dotnet nuget push "out/*.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key ${{ steps.login.outputs.NUGET_API_KEY }} \
+            --skip-duplicate
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.nupkg
+          generate_release_notes: true
