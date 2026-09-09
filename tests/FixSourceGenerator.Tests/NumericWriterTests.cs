@@ -78,16 +78,17 @@ public class NumericWriterTests
                 }
             }
 
-            public static string Generated(int integral, long quantity, decimal fractional, long mantissa, int scale)
+            public static string Generated(long quantity, decimal fractional, long mantissa, int scale)
             {
                 var destination = new byte[512];
-                var writer = new NewOrderSingleWriter(destination);
-                writer.WritePrice(integral);
-                writer.WriteOrderQty(quantity);
-                writer.WriteNoAllocs(1);
-                writer.WriteAllocQty(fractional);
-                writer.WritePrice(mantissa, scale);
-                return Encoding.ASCII.GetString(destination.AsSpan(0, writer.Finish()));
+                Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(destination, state, "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8);
+                var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, quantity);
+                var group = tail.WritePrice(mantissa, scale).SkipTransactTime().SkipExecInst().BeginNoAllocs(1);
+                group = group.BeginEntry("ACC"u8, fractional).SkipNoNested().EndEntry();
+                return Encoding.ASCII.GetString(destination.AsSpan(0, group.EndGroup().Finish()));
             }
         }
         """;
@@ -172,13 +173,12 @@ public class NumericWriterTests
     }
 
     [Fact]
-    public void ExistingIntLongAndDecimalCallSites_CompileAndKeepWireValues()
+    public void ScopedRequiredAndOptionalNumericInputs_KeepWireValues()
     {
-        string frame = Call<string>("Generated", int.MinValue, long.MaxValue, 123.4500m, long.MinValue, 18);
-        Assert.Contains("44=-2147483648\x01", frame);
+        string frame = Call<string>("Generated", long.MaxValue, 123.4500m, long.MinValue, 18);
+        Assert.Contains("44=-9.223372036854775808\x01", frame);
         Assert.Contains("38=9223372036854775807\x01", frame);
         Assert.Contains("80=123.4500\x01", frame);
-        Assert.Contains("44=-9.223372036854775808\x01", frame);
     }
 
     [Theory]
@@ -192,7 +192,7 @@ public class NumericWriterTests
     [InlineData("NUMINGROUP", false)]
     [InlineData("STRING", false)]
     [InlineData("DATA", false)]
-    public void OnlyDecimalSchemaTypes_GainIntegralAndScaledSetters(string fixType, bool numeric)
+    public void RequiredDecimalInputs_UseIntegralAndScaledCarrier(string fixType, bool numeric)
     {
         var field = new FixFieldDef(5001, "VendorValue", fixType, new List<FixValueDef>());
         var fields = new Dictionary<string, FixFieldDef> { [field.Name] = field };
@@ -200,13 +200,16 @@ public class NumericWriterTests
             new List<FixEntry> { new FixFieldRef(field, required: true) });
         var dictionary = TestSupport.BuildDiffDictionary(new[] { message },
             new Dictionary<string, FixComponentDef>(), fields);
-        string source = TestSupport.Generate(dictionary, out _).Single(f => f.hintName.EndsWith("Numbers.g.cs")).content;
-        Assert.Equal(numeric, source.Contains("WriteVendorValue(long value)"));
-        Assert.Equal(numeric, source.Contains("WriteVendorValue(long mantissa, int scale)"));
-        Assert.Contains("""_writer.WriteField("5001="u8, value)""", source);
+        var generated = TestSupport.Generate(dictionary, out _);
+        string source = generated.Single(f => f.hintName.EndsWith("Numbers.g.cs")).content;
+        Assert.Equal(numeric, source.Contains("Runtime.FixDecimal valueVendorValue"));
+        Assert.Contains("""_context.WriteField("5001="u8, valueVendorValue)""", source);
         if (numeric)
         {
-            Assert.Contains("WriteVendorValue(decimal value)", source);
+            string runtime = generated.Single(f => f.hintName.Contains("Runtime")).content;
+            Assert.Contains("implicit operator FixDecimal(decimal value)", runtime);
+            Assert.Contains("implicit operator FixDecimal(long value)", runtime);
+            Assert.Contains("FixDecimal FromScaled(long mantissa, int scale)", runtime);
             Assert.Contains("public decimal VendorValue", source);
         }
     }

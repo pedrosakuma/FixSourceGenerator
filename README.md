@@ -61,11 +61,12 @@ a getting-started guide, a worked example, and the schema-versioning guide. The 
 
    ```csharp
    Span<byte> destination = stackalloc byte[512];
-   var writer = new NewOrderSingleWriter(destination);
-   writer.WriteClOrdID("ORD-1"u8);
-   writer.WriteSide(Side.Buy);
-   writer.WriteOrderQty(100m);
-   int length = writer.Finish(); // backpatches BodyLength + CheckSum
+   Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+   NewOrderSingleWriter.InitializeState(state);
+   var message = new NewOrderSingleWriter(destination, state, "ORD-1"u8);
+   var instrument = message.BeginInstrument("MSFT"u8);
+   var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
+   int length = tail.SkipPrice().SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
    ```
 
 See [`docs/USAGE.md`](docs/USAGE.md) for the full worked example (including components and

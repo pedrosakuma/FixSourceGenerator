@@ -112,62 +112,117 @@ public class MarketDataWriterBenchmarks
 
     private int WriteX(bool scaled)
     {
-        var writer = new MarketDataIncrementalRefreshWriter(_destination);
-        writer.WriteTradeDate(_date);
-        writer.WriteNoMDEntries(Entries);
+        Span<FixWriterState> state = stackalloc FixWriterState[MarketDataIncrementalRefreshWriter.RequiredStateLength];
+        MarketDataIncrementalRefreshWriter.InitializeState(state);
+        var writer = new MarketDataIncrementalRefreshWriter(_destination, state);
+        var component = writer
+            .SkipApplicationSequenceControl()
+            .SkipMDBookType()
+            .SkipMDFeedType()
+            .SkipMDSubFeedType()
+            .WriteTradeDate(_date)
+            .SkipMDReqID()
+            .SkipMarketID()
+            .SkipMarketSegmentID()
+            .BeginMDIncGrp();
+        var group = component.BeginNoMDEntries(Entries);
         for (int i = 0; i < Entries; i++)
         {
-            writer.WriteMDUpdateAction(MDUpdateAction.New);
-            writer.WriteMDEntryType(MDEntryType.Bid);
-            writer.WriteMDEntryID("1234567890123456789"u8);
-            writer.WriteSymbol("SYMBOL"u8);
+            var entry = group.BeginEntry(MDUpdateAction.New)
+                .WriteMDEntryType(MDEntryType.Bid)
+                .WriteMDEntryID("1234567890123456789"u8);
+            var instrument = entry.BeginInstrument();
+            var afterInstrument = instrument.WriteSymbol("SYMBOL"u8).EndInstrument();
+            var numeric = afterInstrument;
             if (scaled)
             {
-                writer.WriteMDEntryPx(_price + i, 4);
-                writer.WriteMDEntrySize(_quantity + i);
+                var afterPrice = numeric.WriteMDEntryPx(_price + i, 4);
+                var afterSize = afterPrice.WriteMDEntrySize(_quantity + i);
+                group = afterSize
+                    .WriteMDEntryDate(_date)
+                    .WriteMDEntryTime(_time)
+                    .WriteExpireDate(_date).WriteExpireTime(_expiry)
+                    .WriteOrderID("9223372036854775807"u8)
+                    .WriteNumberOfOrders(i + 1).EndEntry();
             }
             else
             {
-                writer.WriteMDEntryPx(ExactPrice(_price + i));
-                writer.WriteMDEntrySize((decimal)(_quantity + i));
+                var afterPrice = numeric.WriteMDEntryPx(ExactPrice(_price + i));
+                var afterSize = afterPrice.WriteMDEntrySize((decimal)(_quantity + i));
+                group = afterSize
+                    .WriteMDEntryDate(_date)
+                    .WriteMDEntryTime(_time)
+                    .WriteExpireDate(_date).WriteExpireTime(_expiry)
+                    .WriteOrderID("9223372036854775807"u8)
+                    .WriteNumberOfOrders(i + 1).EndEntry();
             }
-            writer.WriteMDEntryDate(_date);
-            writer.WriteMDEntryTime(_time);
-            writer.WriteExpireDate(_date);
-            writer.WriteExpireTime(_expiry);
-            writer.WriteOrderID("9223372036854775807"u8);
-            writer.WriteNumberOfOrders(i + 1);
         }
-        return writer.Finish();
+        return group.EndGroup().EndMDIncGrp().Finish();
     }
 
     private int WriteW(bool scaled)
     {
-        var writer = new MarketDataSnapshotFullRefreshWriter(_destination);
-        writer.WriteTradeDate(_date);
-        writer.WriteSymbol("SYMBOL"u8);
-        writer.WriteNoMDEntries(Entries);
+        Span<FixWriterState> state = stackalloc FixWriterState[MarketDataSnapshotFullRefreshWriter.RequiredStateLength];
+        MarketDataSnapshotFullRefreshWriter.InitializeState(state);
+        var writer = new MarketDataSnapshotFullRefreshWriter(_destination, state);
+        var instrument = writer
+            .SkipApplicationSequenceControl()
+            .SkipTotNumReports()
+            .SkipMDReportID()
+            .SkipClearingBusinessDate()
+            .SkipMDBookType()
+            .SkipMDSubBookType()
+            .SkipMarketDepth()
+            .SkipMDFeedType()
+            .SkipMDSubFeedType()
+            .SkipRefreshIndicator()
+            .WriteTradeDate(_date)
+            .SkipMDReqID()
+            .SkipMDStreamID()
+            .SkipMarketID()
+            .SkipMarketSegmentID()
+            .BeginInstrument();
+        var afterInstrument = instrument.WriteSymbol("SYMBOL"u8).EndInstrument();
+        var component = afterInstrument
+            .SkipInstrumentExtension()
+            .SkipFinancingDetails()
+            .SkipUndInstrmtGrp()
+            .SkipInstrmtLegGrp()
+            .SkipRelatedInstrumentGrp(_expiry)
+            .SkipFinancialStatus()
+            .SkipCorporateAction()
+            .SkipNetChgPrevDay()
+            .SkipMDSecurityTradingStatus()
+            .SkipMDHaltReason()
+            .BeginMDFullGrp();
+        var group = component.BeginNoMDEntries(Entries);
         for (int i = 0; i < Entries; i++)
         {
-            writer.WriteMDEntryType(MDEntryType.Bid);
-            writer.WriteMDEntryID("1234567890123456789"u8);
+            var entry = group.BeginEntry(MDEntryType.Bid).WriteMDEntryID("1234567890123456789"u8);
             if (scaled)
             {
-                writer.WriteMDEntryPx(_price + i, 4);
-                writer.WriteMDEntrySize(_quantity + i);
+                var afterPrice = entry.WriteMDEntryPx(_price + i, 4);
+                var afterSize = afterPrice.WriteMDEntrySize(_quantity + i);
+                group = afterSize
+                    .WriteMDEntryDate(_date)
+                    .WriteMDEntryTime(_time)
+                    .WriteExpireDate(_date).WriteExpireTime(_expiry)
+                    .WriteOrderID("9223372036854775807"u8)
+                    .WriteNumberOfOrders(i + 1).EndEntry();
             }
             else
             {
-                writer.WriteMDEntryPx(ExactPrice(_price + i));
-                writer.WriteMDEntrySize((decimal)(_quantity + i));
+                var afterPrice = entry.WriteMDEntryPx(ExactPrice(_price + i));
+                var afterSize = afterPrice.WriteMDEntrySize((decimal)(_quantity + i));
+                group = afterSize
+                    .WriteMDEntryDate(_date)
+                    .WriteMDEntryTime(_time)
+                    .WriteExpireDate(_date).WriteExpireTime(_expiry)
+                    .WriteOrderID("9223372036854775807"u8)
+                    .WriteNumberOfOrders(i + 1).EndEntry();
             }
-            writer.WriteMDEntryDate(_date);
-            writer.WriteMDEntryTime(_time);
-            writer.WriteExpireDate(_date);
-            writer.WriteExpireTime(_expiry);
-            writer.WriteOrderID("9223372036854775807"u8);
-            writer.WriteNumberOfOrders(i + 1);
         }
-        return writer.Finish();
+        return group.EndGroup().EndMDFullGrp().Finish();
     }
+
 }

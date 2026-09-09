@@ -30,6 +30,56 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
+### Scoped writer candidate (#31): resource and encoding regressions
+
+This candidate is **not ready for merge**. Its structural safety checks currently increase
+complete encoding time, and full FIX50SP2 generation/compilation has a memory regression.
+The older measurements below describe earlier implementations, not the scoped writer.
+
+Measured serially on AMD EPYC 7763 / Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11,
+BenchmarkDotNet 0.15.8, Release; one launch, two warmups and three measured iterations.
+No implementation builds ran alongside timed workloads. The candidate includes caller-owned
+metadata initialization, required inputs, optional transitions, entry/count closure and `Finish`.
+X/W use the real, full FIX50SP2 dictionary, not a reduced synthetic schema.
+
+| Encoding | Baseline mean (SD), us | Scoped mean (SD), us | Mean ratio |
+|----------|----------------------:|--------------------:|-----------:|
+| Small NewOrderSingle, two parties | 0.453 (0.002) | 1.017 (0.025) | 2.24x |
+| X, 10 entries | 3.282 (0.023) | 8.246 (0.196) | 2.51x |
+| W, 10 entries | 3.096 (0.012) | 7.508 (0.054) | 2.43x |
+| X, 50 entries | 15.829 (0.147) | 39.574 (0.378) | 2.50x |
+| W, 50 entries | 15.037 (0.013) | 33.724 (0.792) | 2.24x |
+
+No managed allocation was reported in these warmed paths. These are short exploratory runs
+with wide 99.9% confidence intervals, not precise production latency guarantees. The ratios
+compare separately measured means; they are not paired BenchmarkDotNet baseline statistics.
+
+The baseline is `68047d0`. For a fair W comparison, its fixture additionally calls
+`writer.WriteLastUpdateTime(_expiry)` immediately after `writer.WriteSymbol("SYMBOL"u8)`.
+The original flat fixture omitted that required field; the scoped API now requires it.
+The table uses the rerun with this correction, not the original incomplete W workload.
+Baseline and candidate X/W frames were compared byte-for-byte at 1/10/50 entries, including
+BodyLength and CheckSum. Their lengths respectively are X: 214/1729/8489 and W: 234/1605/7725.
+
+Run each version from an isolated worktree containing only one matching benchmark project;
+BenchmarkDotNet's solution-root search can otherwise find other worktrees beneath `.git`.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*ReaderWriterBenchmarks.Encode_Generated' \
+    '*MarketDataWriterBenchmarks.X_ScaledAndIntegral' \
+    '*MarketDataWriterBenchmarks.W_ScaledAndIntegral' \
+  --launchCount 1 --warmupCount 2 --iterationCount 3 --buildTimeout 600
+```
+
+Under a 2 GiB managed heap limit (`DOTNET_GCHeapHardLimit=0x80000000`), the existing full-schema
+generation/compilation cases pass for both FIX44 and FIX50SP2 on the baseline. The revised
+candidate passes FIX44 but exhausts memory during Roslyn parsing for FIX50SP2. Passing without
+this limit does not close the resource regression. Optional-tail factoring alone is insufficient;
+generated sub-scope duplication and runtime transition overhead remain blockers for #31.
+
+### Historical small-message comparison
+
 Captured on: AMD EPYC 7763 (WSL/Ubuntu 24.04), .NET 9.0.14, Release, `NewOrderSingle` with one
 component + one 2-entry repeating group (see `ReaderWriterBenchmarks.cs` for the exact message
 shape).

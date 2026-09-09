@@ -129,23 +129,26 @@ foreach (var allocation in order.NoAllocs)
 
 ```csharp
 using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
 Span<byte> destination = stackalloc byte[512];
-var writer = new NewOrderSingleWriter(destination); // writes BeginString/MsgType immediately
-
-writer.WriteClOrdID("ORD-1"u8);
-writer.WriteSide(Side.Buy);
-writer.WriteOrderQty(100m);
-writer.WriteOrdType(OrdType.Limit);
-writer.WritePrice(101.25m);
-writer.WriteSymbol("MSFT"u8);        // Instrument component fields are flattened onto the writer
-writer.WriteNoAllocs(1);              // group counter is written explicitly (see note below)
-writer.WriteAllocAccount("ACC-1"u8);
-writer.WriteAllocQty(100m);
-
-int messageLength = writer.Finish(); // backpatches BodyLength (tag 9) and CheckSum (tag 10)
+Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+NewOrderSingleWriter.InitializeState(state);
+var message = new NewOrderSingleWriter(destination, state, "ORD-1"u8);
+var instrument = message.BeginInstrument("MSFT"u8);
+var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
+var group = tail.WritePrice(101.25m).SkipTransactTime().SkipExecInst().BeginNoAllocs(1);
+group = group.BeginEntry("ACC-1"u8, 100m).SkipNoNested().EndEntry();
+int messageLength = group.EndGroup().Finish();
 SendOverSocket(destination.Slice(0, messageLength));
 ```
+
+Required scalar runs are constructor or scope-transition arguments. Optional fields advance the
+phase through either `Write{Field}` or `Skip{Field}`. Components use `Begin`/`End`; groups use an
+upfront expected count, `BeginEntry`/`EndEntry`, then `EndGroup`. Only completed entries count.
+The typed state span is bounded by maximum group nesting, must not overlap the destination, and
+must remain alive and exclusive until completion. `InitializeState` is idempotent after completion
+but rejects live ownership; it never resets the generation.
 
 ### Destination capacity and failures
 
@@ -165,38 +168,32 @@ and successful writes remain allocation-free.
 
 ### Stack-based identifiers
 
-Byte-span setters and the runtime's `WriteField` / `BeginMessage` use
+Byte-span inputs and the runtime's `WriteField` / `BeginMessage` use
 `scoped ReadOnlySpan<byte>` for inputs: bytes are copied immediately, never retained. This also
-works from helpers receiving the writer by reference, including flattened group setters:
+works across generated scope transitions:
 
 ```csharp
 using System;
 using System.Buffers.Text;
 using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
 static int Encode(Span<byte> destination, long orderId, long accountId)
 {
-    var writer = new NewOrderSingleWriter(destination);
+    Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+    NewOrderSingleWriter.InitializeState(state);
     Span<byte> scratch = stackalloc byte[20]; // sufficient even for long.MinValue
     if (!Utf8Formatter.TryFormat(orderId, scratch, out int written))
         throw new InvalidOperationException("Order ID formatting failed.");
-    writer.WriteClOrdID(scratch[..written]);
-    writer.WriteSide(Side.Buy);
-    writer.WriteOrderQty(100m);
-    writer.WriteSymbol("MSFT"u8);
-    WriteAllocation(ref writer, accountId);
-    return writer.Finish();
-}
-
-static void WriteAllocation(ref NewOrderSingleWriter writer, long accountId)
-{
-    Span<byte> scratch = stackalloc byte[20];
-    if (!Utf8Formatter.TryFormat(accountId, scratch, out int written))
+    var message = new NewOrderSingleWriter(destination, state, scratch[..written]);
+    var instrument = message.BeginInstrument("MSFT"u8);
+    var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
+    if (!Utf8Formatter.TryFormat(accountId, scratch, out int accountWritten))
         throw new InvalidOperationException("Account ID formatting failed.");
-    writer.WriteNoAllocs(1);
-    writer.WriteAllocAccount(scratch[..written]);
-    writer.WriteAllocQty(100m);
+    var group = tail.SkipPrice().SkipTransactTime().SkipExecInst().BeginNoAllocs(1);
+    group = group.BeginEntry(scratch[..accountWritten], 100m).SkipNoNested().EndEntry();
     scratch.Clear(); // does not change bytes already copied into the destination
+    return group.EndGroup().Finish();
 }
 ```
 
@@ -205,9 +202,10 @@ which reference their original input, keep their existing lifetime contracts.
 
 ### Integral and scaled numeric values
 
-For `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, and `PERCENTAGE`, generated writers expose
-three overloads. Readers still return `decimal` / `decimal?` and the original decimal setter
-is unchanged:
+For optional `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, and `PERCENTAGE`, generated writers
+expose decimal, integral and scaled overloads. Required numeric inputs use the allocation-free
+`FixDecimal` carrier, with implicit conversions from `decimal`/`long` and
+`FixDecimal.FromScaled(mantissa, scale)`. Readers still return `decimal` / `decimal?`:
 
 ```csharp
 writer.WritePrice(123.4500m);     // existing decimal API: 44=123.4500
@@ -246,13 +244,11 @@ explicitly before calling the setter if needed). The reader's UTC parsing behavi
 unchanged. TZ types continue to use the same mapped format; this update does not add offsets
 or change precision.
 
-> **Note on the writer and groups (v1 pragmatic decision):** unlike the reader, which exposes
-> components/groups as nested sub-readers, the *writer* flattens component and group fields
-> into `Write{Field}` methods on the message writer, in wire-declaration order (see
-> `docs/CONTRACT.md`, `WriterEmitter` remarks). You write the group counter field explicitly
-> (`WriteNoAllocs(1)` above) before writing that many repetitions of the group's fields — the
-> writer does not automatically count/backpatch group repetitions in v1. This is a documented
-> fast-follow item, not a limitation you need to work around beyond writing the count yourself.
+> **Note on scoped writers and groups:** generated writers expose message, component, group, and
+> entry scopes. Supply required scalar values when entering the phase that owns them, explicitly
+> write or skip optional members in schema order, and close each scope. Start a group with
+> `Begin{Group}(expectedCount)`; the runtime rejects excess entries immediately and rejects a
+> short count at `EndGroup()`. Automatic group-count backpatching is not currently generated.
 
 ## 5. Diagnostics
 
