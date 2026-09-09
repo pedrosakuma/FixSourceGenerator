@@ -37,6 +37,19 @@ means the CLI exited successfully, not that the task has passed review or is rea
 Inspect output and changes before committing. Failed/interrupted runs are preserved; do not
 blindly delete state or rerun against partial work.
 
+After inspecting a `needs-review` delivery, the integrator can explicitly request a revision
+using the completed session UUID printed at the end of its output and a feedback file:
+
+```bash
+scripts/agents/local.sh revise 29 SESSION_UUID /absolute/review-feedback.txt gpt-5.6-sol
+```
+
+This resumes the local conversation with the existing uncommitted changes, optionally on a
+different model. Original output is preserved and revision logs get their own directory.
+The pinned HEAD must still match: revision is for an uncommitted delivery, not for silently
+rebasing or rewriting an already integrated branch. Failed/interrupted sessions are not
+automatically resumed. The same permission restrictions and per-issue lock apply.
+
 ## Permissions and integration
 
 The CLI retains its normal path/URL checks. Tools are allowlisted for local editing,

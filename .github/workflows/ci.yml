@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, chore/api-performance-prework ]
 
 jobs:
   build:
@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
+            6.0.x
+            8.0.x
             9.0.x
             10.0.x
       - name: Fetch dotnet-diagnostics packages
@@ -35,6 +37,13 @@ jobs:
         run: dotnet build FixSourceGenerator.sln --no-restore -c Release
       - name: Test
         run: dotnet test FixSourceGenerator.sln --no-build -c Release
+      - name: Temporal reader runtime compatibility
+        run: |
+          for framework in net6.0 net8.0 net9.0 net10.0; do
+            dotnet test tests/FixSourceGenerator.Tests/FixSourceGenerator.Tests.csproj \
+              -c Release -p:TemporalRuntimeTargetFramework="$framework" \
+              --filter FullyQualifiedName~TemporalReaderTests
+          done
       - name: Check investigation fixtures and local runner
         run: |
           bash -n scripts/agents/local.sh

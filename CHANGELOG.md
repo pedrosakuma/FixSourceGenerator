@@ -27,6 +27,9 @@ versions until `1.0.0`.
   10/50 repeating-group entries.
 
 ### Changed
+- Temporal readers use validated ASCII fast paths for the supported date, time and timestamp
+  formats, preserving the original `TryParseExact` fallback, failure outputs and UTC timestamp
+  Kind without changing the public reader API (#30).
 - Temporal writers now format fixed-position ASCII directly, preserving existing precision,
   invariant formatting, and supplied DateTime clock fields without implicit timezone conversion (#27).
 - Generated setters copy compile-time ASCII tag prefixes through shared runtime value formatters.
