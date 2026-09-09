@@ -12,7 +12,7 @@ namespace FixSourceGenerator.Tests;
 
 /// <summary>
 /// Shared helpers for the codegen tests: sample dictionaries, running <see cref="FixCodeGenerator"/>,
-/// and compiling (and optionally loading) the generated C# against the real net9.0 reference set.
+/// and compiling (and optionally loading) the generated C# against the executing runtime's assemblies.
 /// </summary>
 internal static class TestSupport
 {

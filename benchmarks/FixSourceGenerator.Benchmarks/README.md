@@ -583,6 +583,28 @@ generalize; neither experiment changes the production runtime in this investigat
 
 ### Integrated temporal implementation (#30)
 
+The 51 permanent temporal-reader cases also ran on .NET 6.0.36, 8.0.26, 9.0.14 and
+10.0.11, comparing generated parsing with each executing framework's parser. This includes
+failure defaults, UTC Kind and common-path allocation assertions; it is not exhaustive
+coverage of every input or runtime release.
+
+The opt-in test-project mode excludes QuickFIX/n interoperability dependencies (which require
+.NET 8+) and links only the existing temporal cases and generation helpers. Its binaries and
+intermediates are isolated from the normal suite; without the property, the original .NET 9
+test project is unchanged. Install the corresponding runtimes and run:
+
+```bash
+for framework in net6.0 net8.0 net9.0 net10.0; do
+  dotnet test tests/FixSourceGenerator.Tests/FixSourceGenerator.Tests.csproj \
+    -c Release -p:TemporalRuntimeTargetFramework="$framework" \
+    --filter FullyQualifiedName~TemporalReaderTests
+done
+```
+
+CI runs the same matrix, including for the stacked prework PR. The local .NET 6 run used
+an isolated runtime with `-- RunConfiguration.DotNetHostPath=/path/to/net6/dotnet`;
+compiling the net6/C#11 compatibility consumer remains a separate check.
+
 The interleaved load was rerun against the actual implementation commit `b97be92` and prework
 baseline `a0b1aab`, with other local agents no longer building. Same .NET 10 host and paired-load
 protocol: one thread, eight alternating 250 ms blocks per implementation/case after warmup.
