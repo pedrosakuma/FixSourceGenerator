@@ -10,5 +10,6 @@
     <ProjectReference Include="../../src/FixSourceGenerator/FixSourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <AdditionalFiles Include="../FixSourceGenerator.Tests/TestData/FIX44.xml" />
     <CompilerVisibleProperty Include="FixGeneratorNamespace" />
+    <Compile Include="../FixSourceGenerator.Tests/ScopedApiContractExamples.cs" Link="ScopedApiContractExamples.cs" />
   </ItemGroup>
 </Project>
