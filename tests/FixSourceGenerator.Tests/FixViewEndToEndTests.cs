@@ -25,9 +25,14 @@ public class FixViewEndToEndTests
 
     private static (GeneratorDriverRunResult Result, CSharpCompilation Compilation) RunGenerator(string consumerSource, string? rootNamespace = "Acme")
     {
+        return RunGeneratorWithSchema(consumerSource, LoadTestData("FIX44-mini.xml"), rootNamespace);
+    }
+
+    private static (GeneratorDriverRunResult Result, CSharpCompilation Compilation) RunGeneratorWithSchema(string consumerSource, string schemaXml, string? rootNamespace = "Acme")
+    {
         var additionalText = new InMemoryAdditionalText(
             Path.Combine(AppContext.BaseDirectory, "TestData", "FIX44-mini.xml"),
-            LoadTestData("FIX44-mini.xml"));
+            schemaXml);
 
         var optionsProvider = new InMemoryAnalyzerConfigOptionsProvider(rootNamespace);
 
@@ -54,6 +59,18 @@ public class FixViewEndToEndTests
 
         driver = driver.RunGenerators(compilation);
         return (driver.GetRunResult(), compilation);
+    }
+
+    private static Assembly CompileGeneratedAssembly(string consumerSource, string schemaXml)
+    {
+        var (result, compilation) = RunGeneratorWithSchema(consumerSource, schemaXml);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+        return Assembly.Load(stream.ToArray());
     }
 
     private const string ConsumerSource = @"
@@ -281,9 +298,9 @@ namespace Acme.Views
         var combinedSource = string.Join("\n", result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SourceText.ToString()));
         Assert.Contains("NoPartyIDsGroupReader", combinedSource);
 
-        // The group must NOT participate in the scanning constructor's early-exit switch/count —
-        // only ClOrdID (1 field) should be tracked by `remaining`.
-        Assert.Contains("int remaining = 1;", combinedSource);
+        // Both the scalar and the bounded group must be located in their owning scope.
+        Assert.Contains("int remaining = 2;", combinedSource);
+        Assert.Contains("_NoPartyIDsLength", combinedSource);
     }
 
     [Fact]
@@ -356,6 +373,654 @@ namespace Acme.Views
 ";
         var (result, _) = RunGenerator(source);
         Assert.Contains(result.Diagnostics, d => d.Id == "FIX015");
+    }
+
+    // --- issue #32: selective entry/component projections (component-scoped and group-entry-scoped [FixView]) ---
+
+    private const string ComponentScopedConsumerSource = @"
+using FixSourceGenerator.Attributes;
+
+namespace Acme.Views
+{
+    // Targets the ""Instrument"" *component* directly, instead of the message that embeds it —
+    // a selective projection over just Symbol, without the full InstrumentReader's SecurityID slot.
+    [FixView(""Instrument"")]
+    public readonly ref partial struct SymbolOnlyView
+    {
+        public partial global::System.ReadOnlySpan<byte> Symbol { get; }
+    }
+
+    public static class SymbolOnlyViewTestHarness
+    {
+        public static byte[] Read(byte[] buffer) => new SymbolOnlyView(buffer).Symbol.ToArray();
+    }
+}
+";
+
+    [Fact]
+    public void Component_scoped_FixView_matches_and_emits_early_exit_constructor()
+    {
+        var (result, _) = RunGenerator(ComponentScopedConsumerSource);
+
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var combinedSource = string.Join("\n", result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SourceText.ToString()));
+        Assert.Contains("SymbolOnlyView", combinedSource);
+        Assert.Contains("int remaining = 1;", combinedSource);
+    }
+
+    [Fact]
+    public void Component_scoped_FixView_reads_the_requested_field_from_a_component_sub_span()
+    {
+        var (result, compilation) = RunGenerator(ComponentScopedConsumerSource);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+
+        using var ms = new MemoryStream();
+        var emitResult = finalCompilation.Emit(ms);
+        Assert.True(emitResult.Success, string.Join("\n", emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+
+        ms.Seek(0, SeekOrigin.Begin);
+        var assembly = Assembly.Load(ms.ToArray());
+        var harnessType = assembly.GetType("Acme.Views.SymbolOnlyViewTestHarness")!;
+
+        // The component's own sub-span: only Instrument's fields (Symbol/SecurityID), same as
+        // what the full InstrumentReader would be constructed over.
+        byte[] buffer = TestSupport.Fix("55=IBM", "48=SEC-1");
+
+        var readMethod = harnessType.GetMethod("Read")!;
+        var symbol = (byte[])readMethod.Invoke(null, new object[] { buffer })!;
+
+        Assert.Equal("IBM", System.Text.Encoding.ASCII.GetString(symbol));
+    }
+
+    // A group name reused by two different messages with a *different* entry shape (this
+    // happens in real dictionaries, e.g. FIX50SP2's MDFullGrp/MDIncGrp both wrapping a group
+    // literally named "NoMDEntries" with different member fields). Resolving [FixView("NoMDEntries")]
+    // by picking "the first one found" would silently generate a projection against the wrong
+    // occurrence's field set for one of the two messages — instead this must be rejected (FIX016).
+    private const string AmbiguousGroupSchema = @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<fix type=""FIX"" major=""4"" minor=""4"" servicepack=""0"">
+  <header><field name=""MsgType"" required=""Y""/></header>
+  <trailer><field name=""CheckSum"" required=""Y""/></trailer>
+  <messages>
+    <message name=""FirstMessage"" msgtype=""1"" msgcat=""app"">
+      <group name=""NoEntries"" required=""N"">
+        <field name=""EntryID"" required=""Y""/>
+      </group>
+    </message>
+    <message name=""SecondMessage"" msgtype=""2"" msgcat=""app"">
+      <group name=""NoEntries"" required=""N"">
+        <field name=""EntryID"" required=""Y""/>
+        <field name=""EntryType"" required=""N""/>
+      </group>
+    </message>
+  </messages>
+  <components></components>
+  <fields>
+    <field number=""35"" name=""MsgType"" type=""STRING""/>
+    <field number=""10"" name=""CheckSum"" type=""STRING""/>
+    <field number=""73"" name=""NoEntries"" type=""NUMINGROUP""/>
+    <field number=""1001"" name=""EntryID"" type=""STRING""/>
+    <field number=""1002"" name=""EntryType"" type=""CHAR""/>
+  </fields>
+</fix>
+";
+
+    [Fact]
+    public void Reports_FIX016_when_group_scope_name_is_ambiguous_across_messages()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NoEntries"")]
+    public readonly ref partial struct AmbiguousEntryView
+    {
+        public partial global::System.ReadOnlySpan<byte> EntryID { get; }
+    }
+}
+";
+        var (result, _) = RunGeneratorWithSchema(source, AmbiguousGroupSchema);
+        Assert.Contains(result.Diagnostics, d => d.Id == "FIX016");
+    }
+
+    [Fact]
+    public void Qualified_group_scopes_resolve_distinct_occurrences()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""FirstMessage.NoEntries"")]
+    public readonly ref partial struct FirstEntriesView
+    {
+        public partial global::System.ReadOnlySpan<byte> EntryID { get; }
+    }
+    [FixView(""SecondMessage.NoEntries"")]
+    public readonly ref partial struct SecondEntriesView
+    {
+        public partial char? EntryType { get; }
+    }
+}
+";
+        var (result, compilation) = RunGeneratorWithSchema(source, AmbiguousGroupSchema);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+    }
+
+    private const string NestedScopeSchema = @"<fix type=""FIX"" major=""4"" minor=""4"" servicepack=""0"">
+  <header><field name=""MsgType"" required=""Y""/></header>
+  <trailer><field name=""CheckSum"" required=""Y""/></trailer>
+  <messages>
+    <message name=""Envelope"" msgtype=""U1"" msgcat=""app"">
+      <group name=""NoOuter"" required=""N"">
+        <field name=""OuterID"" required=""Y""/>
+        <field name=""SharedValue"" required=""N""/>
+        <group name=""NoInner"" required=""N"">
+          <field name=""InnerID"" required=""Y""/>
+          <field name=""SharedValue"" required=""N""/>
+        </group>
+        <field name=""AfterValue"" required=""N""/>
+      </group>
+    </message>
+  </messages>
+  <components/>
+  <fields>
+    <field number=""35"" name=""MsgType"" type=""STRING""/>
+    <field number=""10"" name=""CheckSum"" type=""STRING""/>
+    <field number=""1000"" name=""NoOuter"" type=""NUMINGROUP""/>
+    <field number=""1001"" name=""OuterID"" type=""STRING""/>
+    <field number=""1002"" name=""SharedValue"" type=""INT""/>
+    <field number=""2000"" name=""NoInner"" type=""NUMINGROUP""/>
+    <field number=""2001"" name=""InnerID"" type=""STRING""/>
+    <field number=""1003"" name=""AfterValue"" type=""INT""/>
+  </fields>
+</fix>";
+
+    [Fact]
+    public void Entry_projection_does_not_read_a_nested_value_as_an_absent_parent_value()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NoOuter"")]
+    public readonly ref partial struct OuterValueView
+    {
+        public partial int? SharedValue { get; }
+    }
+    public static class OuterValueHarness
+    {
+        public static int? Read(byte[] entry) => new OuterValueView(entry).SharedValue;
+    }
+}
+";
+        var (result, compilation) = RunGeneratorWithSchema(source, NestedScopeSchema);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+        var assembly = Assembly.Load(stream.ToArray());
+        var read = assembly.GetType("Acme.Views.OuterValueHarness")!.GetMethod("Read")!;
+        byte[] entry = TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "1002=7");
+        Assert.Null(read.Invoke(null, new object[] { entry }));
+        byte[] present = TestSupport.Fix("1001=OUTER", "1002=3", "2000=1", "2001=INNER", "1002=7");
+        Assert.Equal(3, read.Invoke(null, new object[] { present }));
+    }
+
+    [Fact]
+    public void Entry_projection_honors_nested_group_boundaries_counts_orders_and_duplicates()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct OuterValueView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+        public partial int? AfterValue { get; }
+        public partial Acme.Fix.V44.NoInnerGroupReader NoInner { get; }
+    }
+    public static class BoundaryHarness
+    {
+        public static int? Read(byte[] entry) => new OuterValueView(entry).AfterValue;
+        public static int InnerCount(byte[] entry) => new OuterValueView(entry).NoInner.Count;
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, NestedScopeSchema);
+        var harness = assembly.GetType("Acme.Views.BoundaryHarness")!;
+        var read = harness.GetMethod("Read")!;
+        var count = harness.GetMethod("InnerCount")!;
+
+        Assert.Equal(9, read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "1002=7", "1003=9") }));
+        Assert.Equal(9, read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=0", "1003=9") }));
+        Assert.Equal(5, read.Invoke(null, new object[] { TestSupport.Fix("1003=5", "2000=1", "2001=INNER", "1003=9") }));
+        Assert.Equal(9, read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "9999=X", "1003=9") }));
+        Assert.Null(read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=2", "2001=INNER", "1003=9") }));
+        Assert.Null(read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "1003=7") }));
+        Assert.Null(read.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "2001=A", "2001=B", "1003=9") }));
+        Assert.Equal(1, count.Invoke(null, new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "1003=9") }));
+    }
+
+    [Fact]
+    public void Required_fields_in_optional_components_are_contextually_optional_and_spans_expose_presence()
+    {
+        const string schema = @"<fix type=""FIX"" major=""4"" minor=""4"" servicepack=""0"">
+  <header><field name=""MsgType"" required=""Y""/></header>
+  <trailer><field name=""CheckSum"" required=""Y""/></trailer>
+  <messages>
+    <message name=""Envelope"" msgtype=""U1"" msgcat=""app"">
+      <group name=""NoEntries"" required=""N"">
+        <field name=""EntryID"" required=""Y""/>
+        <component name=""OptionalDetails"" required=""N""/>
+      </group>
+    </message>
+  </messages>
+  <components>
+    <component name=""OptionalDetails"">
+      <field name=""Code"" required=""Y""/>
+      <field name=""Quantity"" required=""Y""/>
+    </component>
+  </components>
+  <fields>
+    <field number=""35"" name=""MsgType"" type=""STRING""/>
+    <field number=""10"" name=""CheckSum"" type=""STRING""/>
+    <field number=""1000"" name=""NoEntries"" type=""NUMINGROUP""/>
+    <field number=""1001"" name=""EntryID"" type=""STRING""/>
+    <field number=""1002"" name=""Code"" type=""STRING""/>
+    <field number=""1003"" name=""Quantity"" type=""INT""/>
+  </fields>
+</fix>";
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoEntries"")]
+    public readonly ref partial struct EntryView
+    {
+        public partial global::System.ReadOnlySpan<byte> EntryID { get; }
+        public partial global::System.ReadOnlySpan<byte> Code { get; }
+        public partial int? Quantity { get; }
+    }
+    public static class OptionalHarness
+    {
+        public static bool HasCode(byte[] entry) => new EntryView(entry).TryGetCode(out _);
+        public static int CodeLength(byte[] entry)
+        {
+            var view = new EntryView(entry);
+            return view.TryGetCode(out var code) ? code.Length : -1;
+        }
+        public static int? Quantity(byte[] entry) => new EntryView(entry).Quantity;
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, schema);
+        var harness = assembly.GetType("Acme.Views.OptionalHarness")!;
+        Assert.False((bool)harness.GetMethod("HasCode")!.Invoke(null, new object[] { TestSupport.Fix("1001=A") })!);
+        Assert.Equal(-1, harness.GetMethod("CodeLength")!.Invoke(null, new object[] { TestSupport.Fix("1001=A") }));
+        Assert.True((bool)harness.GetMethod("HasCode")!.Invoke(null, new object[] { TestSupport.Fix("1001=A", "1002=") })!);
+        Assert.Equal(0, harness.GetMethod("CodeLength")!.Invoke(null, new object[] { TestSupport.Fix("1001=A", "1002=") }));
+        Assert.Null(harness.GetMethod("Quantity")!.Invoke(null, new object[] { TestSupport.Fix("1001=A") }));
+        Assert.Equal(0, harness.GetMethod("Quantity")!.Invoke(null, new object[] { TestSupport.Fix("1001=A", "1003=0") }));
+    }
+
+    [Fact]
+    public void Group_projection_does_not_find_a_counter_in_an_unrelated_child_scope()
+    {
+        string schema = NestedScopeSchema.Replace(
+            "<field name=\"SharedValue\" required=\"N\"/>\n        <group",
+            "<field name=\"SharedValue\" required=\"N\"/>\n" +
+            "<group name=\"NoBefore\" required=\"N\"><field name=\"BeforeID\" required=\"Y\"/>" +
+            "<group name=\"NoInner\" required=\"N\"><field name=\"InnerID\" required=\"Y\"/>" +
+            "<field name=\"SharedValue\" required=\"N\"/></group></group>\n        <group")
+            .Replace("<fields>", "<fields><field number=\"3000\" name=\"NoBefore\" type=\"NUMINGROUP\"/>" +
+                "<field number=\"3001\" name=\"BeforeID\" type=\"STRING\"/>");
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct GroupView
+    {
+        public partial Acme.Fix.V44.NoInnerGroupReader NoInner { get; }
+    }
+    public static class GroupHarness
+    {
+        public static int Count(byte[] entry) => new GroupView(entry).NoInner.Count;
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, schema);
+        var count = assembly.GetType("Acme.Views.GroupHarness")!.GetMethod("Count")!;
+        Assert.Equal(0, count.Invoke(null, new object[] {
+            TestSupport.Fix("1001=OUTER", "3000=1", "3001=BEFORE", "2000=1", "2001=INNER") }));
+        Assert.Equal(0, count.Invoke(null, new object[] {
+            TestSupport.Fix("1001=OUTER", "3000=1", "3001=BEFORE", "2000=1", "2001=INNER", "2000=0") }));
+        Assert.Equal(2, count.Invoke(null, new object[] {
+            TestSupport.Fix("1001=OUTER", "3000=1", "3001=BEFORE", "2000=1", "2001=INNER",
+                "2000=2", "2001=OWN-A", "2001=OWN-B") }));
+    }
+
+    [Fact]
+    public void CurrentSpan_preserves_nested_entries_reusing_the_parent_delimiter()
+    {
+        string schema = NestedScopeSchema.Replace(
+            "<field name=\"InnerID\" required=\"Y\"/>", "<field name=\"OuterID\" required=\"Y\"/>");
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct AfterView
+    {
+        public partial int? AfterValue { get; }
+    }
+    public static class AfterHarness
+    {
+        public static int? Read(byte[] buffer)
+        {
+            var entries = new Acme.Fix.V44.NoOuterGroupReader(buffer).GetEnumerator();
+            if (!entries.MoveNext()) throw new System.InvalidOperationException();
+            return new AfterView(entries.CurrentSpan).AfterValue;
+        }
+        public static string[] Spans(byte[] buffer)
+        {
+            var result = new System.Collections.Generic.List<string>();
+            var entries = new Acme.Fix.V44.NoOuterGroupReader(buffer).GetEnumerator();
+            while (entries.MoveNext())
+                result.Add(System.Text.Encoding.ASCII.GetString(entries.CurrentSpan));
+            return result.ToArray();
+        }
+        public static long Allocated(byte[] buffer)
+        {
+            for (int i = 0; i < 32; i++) Read(buffer);
+            long before = System.GC.GetAllocatedBytesForCurrentThread();
+            int sum = 0;
+            for (int i = 0; i < 1000; i++) sum += Read(buffer) ?? 0;
+            return sum == 9000 ? System.GC.GetAllocatedBytesForCurrentThread() - before : -1;
+        }
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, schema);
+        var read = assembly.GetType("Acme.Views.AfterHarness")!.GetMethod("Read")!;
+        Assert.Equal(9, read.Invoke(null, new object[] {
+            TestSupport.Fix("1000=1", "1001=OUTER", "2000=1", "1001=INNER", "1003=9") }));
+        var spans = (string[])assembly.GetType("Acme.Views.AfterHarness")!.GetMethod("Spans")!
+            .Invoke(null, new object[] { TestSupport.Fix("1000=2", "1001=A", "2000=1", "1001=CHILD-A",
+                "1001=B", "2000=1", "1001=CHILD-B") })!;
+        Assert.Equal(new[] { "1001=A\u00012000=1\u00011001=CHILD-A\u0001",
+            "1001=B\u00012000=1\u00011001=CHILD-B\u0001" }, spans);
+        Assert.Equal(0L, assembly.GetType("Acme.Views.AfterHarness")!.GetMethod("Allocated")!
+            .Invoke(null, new object[] {
+                TestSupport.Fix("1000=1", "1001=OUTER", "2000=1", "1001=INNER", "1003=9") }));
+    }
+
+    [Fact]
+    public void CurrentSpan_handles_a_nested_counter_as_the_first_entry_field()
+    {
+        string schema = NestedScopeSchema.Replace("\n        <field name=\"OuterID\" required=\"Y\"/>\n", "\n")
+            .Replace("\n        <field name=\"SharedValue\" required=\"N\"/>\n", "\n");
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct AfterView
+    {
+        public partial int? AfterValue { get; }
+    }
+    public static class CounterHarness
+    {
+        public static int Sum(byte[] buffer)
+        {
+            int sum = 0;
+            var entries = new Acme.Fix.V44.NoOuterGroupReader(buffer).GetEnumerator();
+            while (entries.MoveNext()) sum += new AfterView(entries.CurrentSpan).AfterValue ?? 0;
+            return sum;
+        }
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, schema);
+        Assert.Equal(12, assembly.GetType("Acme.Views.CounterHarness")!.GetMethod("Sum")!
+            .Invoke(null, new object[] {
+                TestSupport.Fix("1000=2", "2000=1", "2001=A", "1003=3", "2000=1", "2001=B", "1003=9") }));
+    }
+
+    [Fact]
+    public void Sparse_and_dense_views_emit_state_only_for_requested_fields()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct SparseView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+    }
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct DenseView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+        public partial int? SharedValue { get; }
+        public partial int? AfterValue { get; }
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, NestedScopeSchema);
+        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+        Assert.Equal(3, assembly.GetType("Acme.Views.SparseView")!.GetFields(fields).Length);
+        Assert.Equal(9, assembly.GetType("Acme.Views.DenseView")!.GetFields(fields).Length);
+    }
+
+    [Fact]
+    public void Duplicate_after_early_exit_does_not_replace_the_first_occurrence()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct IdView
+    {
+        public partial global::System.ReadOnlySpan<byte> ClOrdID { get; }
+    }
+    public static class IdHarness
+    {
+        public static byte[] Read(byte[] buffer) => new IdView(buffer).ClOrdID.ToArray();
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, LoadTestData("FIX44-mini.xml"));
+        var read = assembly.GetType("Acme.Views.IdHarness")!.GetMethod("Read")!;
+        var value = (byte[])read.Invoke(null, new object[] { TestSupport.Fix("11=FIRST", "11=SECOND") })!;
+        Assert.Equal("FIRST", System.Text.Encoding.ASCII.GetString(value));
+    }
+
+    private const string GroupEntryScopedConsumerSource = @"
+using FixSourceGenerator.Attributes;
+
+namespace Acme.Views
+{
+    // Targets the ""NoPartyIDs"" *group*'s own entry scope directly (issue #32) — a selective
+    // projection reading only PartyID out of each entry, fed the entry's raw span via
+    // {Group}GroupReader.Enumerator.CurrentSpan instead of the full {Group}EntryReader.
+    [FixView(""NoPartyIDs"")]
+    public readonly ref partial struct PartyIdOnlyEntryView
+    {
+        public partial global::System.ReadOnlySpan<byte> PartyID { get; }
+    }
+
+    public static class PartyIdOnlyEntryViewTestHarness
+    {
+        public static byte[][] ReadAllPartyIds(byte[] buffer)
+        {
+            var group = new Acme.Fix.V44.NoPartyIDsGroupReader(buffer);
+            var results = new System.Collections.Generic.List<byte[]>();
+            var e = group.GetEnumerator();
+            while (e.MoveNext())
+            {
+                var view = new PartyIdOnlyEntryView(e.CurrentSpan);
+                results.Add(view.PartyID.ToArray());
+            }
+
+            return results.ToArray();
+        }
+    }
+}
+";
+
+    [Fact]
+    public void Group_entry_scoped_FixView_matches_and_emits_early_exit_constructor()
+    {
+        var (result, _) = RunGenerator(GroupEntryScopedConsumerSource);
+
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var combinedSource = string.Join("\n", result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SourceText.ToString()));
+        Assert.Contains("PartyIdOnlyEntryView", combinedSource);
+        Assert.Contains("int remaining = 1;", combinedSource);
+    }
+
+    [Fact]
+    public void Group_entry_scoped_FixView_reads_PartyID_from_each_entrys_CurrentSpan()
+    {
+        var (result, compilation) = RunGenerator(GroupEntryScopedConsumerSource);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+
+        using var ms = new MemoryStream();
+        var emitResult = finalCompilation.Emit(ms);
+        Assert.True(emitResult.Success, string.Join("\n", emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+
+        ms.Seek(0, SeekOrigin.Begin);
+        var assembly = Assembly.Load(ms.ToArray());
+        var harnessType = assembly.GetType("Acme.Views.PartyIdOnlyEntryViewTestHarness")!;
+
+        byte[] buffer = TestSupport.Fix(
+            "11=ABC123", "55=IBM", "54=1", "38=100", "40=2", "44=99.5",
+            "453=2", "448=PARTY-1", "447=1", "452=1", "448=PARTY-2", "447=1", "452=3");
+
+        var readMethod = harnessType.GetMethod("ReadAllPartyIds")!;
+        var partyIds = (byte[][])readMethod.Invoke(null, new object[] { buffer })!;
+
+        Assert.Equal(2, partyIds.Length);
+        Assert.Equal("PARTY-1", System.Text.Encoding.ASCII.GetString(partyIds[0]));
+        Assert.Equal("PARTY-2", System.Text.Encoding.ASCII.GetString(partyIds[1]));
+    }
+
+    [Fact]
+    public void Retained_entry_view_remains_valid_after_enumerator_moves_next()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""NewOrderSingle.NoPartyIDs"")]
+    public readonly ref partial struct PartyView
+    {
+        public partial global::System.ReadOnlySpan<byte> PartyID { get; }
+    }
+    public static class RetainedHarness
+    {
+        public static byte[] ReadFirstAfterMoveNext(byte[] buffer)
+        {
+            var e = new Acme.Fix.V44.NoPartyIDsGroupReader(buffer).GetEnumerator();
+            if (!e.MoveNext()) return global::System.Array.Empty<byte>();
+            var first = new PartyView(e.CurrentSpan);
+            if (!e.MoveNext()) return global::System.Array.Empty<byte>();
+            return first.PartyID.ToArray();
+        }
+    }
+}
+";
+        var assembly = CompileGeneratedAssembly(source, LoadTestData("FIX44-mini.xml"));
+        byte[] buffer = TestSupport.Fix(
+            "453=2", "448=PARTY-1", "447=1", "452=1", "448=PARTY-2", "447=1", "452=3");
+        var method = assembly.GetType("Acme.Views.RetainedHarness")!.GetMethod("ReadFirstAfterMoveNext")!;
+        var first = (byte[])method.Invoke(null, new object[] { buffer })!;
+        Assert.Equal("PARTY-1", System.Text.Encoding.ASCII.GetString(first));
+    }
+
+    private const string DuplicateTagConsumerSource = @"
+using FixSourceGenerator.Attributes;
+
+namespace Acme.Views
+{
+    // 3 requested fields so the early-exit scan doesn't reach the end of the buffer regardless —
+    // proves the duplicate ClOrdID doesn't disturb locating OrderQty/OrdType afterwards.
+    [FixView(""NewOrderSingle"")]
+    public readonly ref partial struct FirstOccurrenceView
+    {
+        public partial global::System.ReadOnlySpan<byte> ClOrdID { get; }
+        public partial decimal OrderQty { get; }
+
+        // OrdType (40) has <value> children in the schema, so it's enum-eligible: the accepted
+        // escape-hatch type is the CHAR category's underlying wire representation (byte), not
+        // char itself (see FixViewTypeCompatibility).
+        public partial byte OrdType { get; }
+    }
+
+    public static class FirstOccurrenceViewTestHarness
+    {
+        public static (byte[] ClOrdId, decimal OrderQty, byte OrdType) Read(byte[] buffer)
+        {
+            var view = new FirstOccurrenceView(buffer);
+            return (view.ClOrdID.ToArray(), view.OrderQty, view.OrdType);
+        }
+    }
+}
+";
+
+    [Fact]
+    public void Duplicate_tag_before_early_exit_boundary_does_not_prevent_locating_later_fields()
+    {
+        var (result, compilation) = RunGenerator(DuplicateTagConsumerSource);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+
+        using var ms = new MemoryStream();
+        var emitResult = finalCompilation.Emit(ms);
+        Assert.True(emitResult.Success, string.Join("\n", emitResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
+
+        ms.Seek(0, SeekOrigin.Begin);
+        var assembly = Assembly.Load(ms.ToArray());
+        var harnessType = assembly.GetType("Acme.Views.FirstOccurrenceViewTestHarness")!;
+
+        // ClOrdID (11) appears twice before OrderQty(38)/OrdType(40). A naive "decrement remaining
+        // on every match" scan would count the duplicate as a second distinct field found and
+        // early-exit right after it — before OrderQty/OrdType are ever seen — leaving them at
+        // their zero-initialized defaults instead of the real values below.
+        byte[] buffer = TestSupport.Fix("11=FIRST", "11=SECOND", "38=250", "40=1", "55=IBM");
+
+        var readMethod = harnessType.GetMethod("Read")!;
+        var tuple = readMethod.Invoke(null, new object[] { buffer })!;
+        var tupleType = tuple.GetType();
+        var clOrdId = (byte[])tupleType.GetField("Item1")!.GetValue(tuple)!;
+        var orderQty = (decimal)tupleType.GetField("Item2")!.GetValue(tuple)!;
+        var ordType = (byte)tupleType.GetField("Item3")!.GetValue(tuple)!;
+
+        // First occurrence wins: "FIRST", not "SECOND".
+        Assert.Equal("FIRST", System.Text.Encoding.ASCII.GetString(clOrdId));
+        Assert.Equal(250m, orderQty);
+        Assert.Equal((byte)'1', ordType);
     }
 
     private sealed class InMemoryAdditionalText : AdditionalText

@@ -84,8 +84,8 @@ namespace FixSourceGenerator.Diagnostics
 
         public static readonly DiagnosticDescriptor FixViewMessageNotFound = new DiagnosticDescriptor(
             id: "FIX010",
-            title: "FixView target message not found",
-            messageFormat: "[FixView(\"{0}\")] on '{1}' does not match any message in the loaded schema(s)",
+            title: "FixView target scope not found",
+            messageFormat: "[FixView(\"{0}\")] on '{1}' does not match any message, component, or group in the loaded schema(s)",
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
@@ -126,6 +126,14 @@ namespace FixSourceGenerator.Diagnostics
             id: "FIX015",
             title: "Multiple FixView properties target the same field",
             messageFormat: "Property '{0}' targets field '{1}', which is already targeted by property '{2}' on '{3}'",
+            category: Category,
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        public static readonly DiagnosticDescriptor FixViewAmbiguousGroupScope = new DiagnosticDescriptor(
+            id: "FIX016",
+            title: "FixView target scope is ambiguous",
+            messageFormat: "[FixView(\"{0}\")] on '{1}' matches more than one scope in the loaded schemas; use a qualified message or component path",
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);

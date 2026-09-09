@@ -28,22 +28,83 @@ namespace FixSourceGenerator.Views
                 return null;
             }
 
-            FixMessageDef? message = null;
+            IReadOnlyList<FixEntry>? scopeEntries = null;
+            string scopeName = request.MessageName;
             string? runtimeNs = null;
             string? schemaNs = null;
-            foreach (var (schema, schemaRuntimeNs, schemaNamespace) in schemas)
+
+            bool qualified = request.MessageName.IndexOf('.') >= 0;
+            var scopeCandidates = new List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)>();
+
+            if (qualified)
             {
-                var match = schema.Messages.FirstOrDefault(m => string.Equals(m.Name, request.MessageName, StringComparison.Ordinal));
-                if (match != null)
+                CollectQualifiedCandidates(schemas, request.MessageName, messageRoot: true, scopeCandidates);
+                if (scopeCandidates.Count == 0)
                 {
-                    message = match;
-                    runtimeNs = schemaRuntimeNs;
-                    schemaNs = schemaNamespace;
-                    break;
+                    CollectQualifiedCandidates(schemas, request.MessageName, messageRoot: false, scopeCandidates);
+                }
+            }
+            else
+            {
+                // Preserve the original message contract globally: a component in an earlier
+                // schema must not steal a message target in a later schema.
+                foreach (var (schema, schemaRuntimeNs, schemaNamespace) in schemas)
+                {
+                    foreach (var message in schema.Messages)
+                    {
+                        if (string.Equals(message.Name, request.MessageName, StringComparison.Ordinal))
+                        {
+                            scopeCandidates.Add((message.Entries, message.Name, schemaRuntimeNs, schemaNamespace));
+                            break;
+                        }
+                    }
+
+                    if (scopeCandidates.Count != 0)
+                    {
+                        break;
+                    }
+                }
+
+                if (scopeCandidates.Count == 0)
+                {
+                    foreach (var (schema, schemaRuntimeNs, schemaNamespace) in schemas)
+                    {
+                        if (schema.ComponentsByName.TryGetValue(request.MessageName, out var component))
+                        {
+                            scopeCandidates.Add((component.Entries, component.Name, schemaRuntimeNs, schemaNamespace));
+                        }
+                    }
+                }
+
+                if (scopeCandidates.Count == 0)
+                {
+                    foreach (var (schema, schemaRuntimeNs, schemaNamespace) in schemas)
+                    {
+                        CollectGroups(schema.Messages, request.MessageName, schemaRuntimeNs, schemaNamespace, scopeCandidates);
+                    }
                 }
             }
 
-            if (message == null || runtimeNs == null || schemaNs == null)
+            if (scopeCandidates.Count > 1)
+            {
+                reportDiagnostic(Diagnostic.Create(
+                    Diagnostics.FixDiagnostics.FixViewAmbiguousGroupScope,
+                    request.StructLocation,
+                    request.MessageName,
+                    request.StructName));
+                return null;
+            }
+
+            if (scopeCandidates.Count == 1)
+            {
+                var candidate = scopeCandidates[0];
+                scopeEntries = candidate.Entries;
+                scopeName = candidate.Name;
+                runtimeNs = candidate.RuntimeNs;
+                schemaNs = candidate.SchemaNs;
+            }
+
+            if (scopeEntries == null || runtimeNs == null || schemaNs == null)
             {
                 reportDiagnostic(Diagnostic.Create(
                     Diagnostics.FixDiagnostics.FixViewMessageNotFound,
@@ -54,10 +115,10 @@ namespace FixSourceGenerator.Views
             }
 
             var fieldsByName = new Dictionary<string, (FixFieldDef Field, bool Required)>(StringComparer.Ordinal);
-            FixViewFieldCollector.Collect(message.Entries, fieldsByName);
+            FixViewFieldCollector.Collect(scopeEntries, fieldsByName);
 
             var groupsByName = new Dictionary<string, FixGroupRef>(StringComparer.Ordinal);
-            FixViewFieldCollector.CollectGroups(message.Entries, groupsByName);
+            FixViewFieldCollector.CollectGroups(scopeEntries, groupsByName);
 
             var slots = new List<(FixViewPropertyModel Property, FixFieldDef Field, bool Required)>();
             var groupSlots = new List<(FixViewPropertyModel Property, FixGroupRef Group)>();
@@ -96,7 +157,7 @@ namespace FixSourceGenerator.Views
                             property.Location,
                             property.FieldNameOverride,
                             property.PropertyName,
-                            message.Name));
+                            scopeName));
                     }
                     else
                     {
@@ -108,7 +169,7 @@ namespace FixSourceGenerator.Views
                             property.Location,
                             property.PropertyName,
                             request.StructName,
-                            message.Name,
+                            scopeName,
                             suggestionText));
                     }
 
@@ -191,17 +252,71 @@ namespace FixSourceGenerator.Views
                 return null;
             }
 
-            string content = EmitStruct(request, message, runtimeNs!, schemaNs!, slots, groupSlots);
+            string content = EmitStruct(request, runtimeNs!, schemaNs!, scopeEntries, slots, groupSlots);
             string ns = string.IsNullOrEmpty(request.ContainingNamespace) ? string.Empty : request.ContainingNamespace + ".";
             string hintName = $"{ns}{request.StructName}.FixView.g.cs";
             return (hintName, content);
         }
 
-        private static string EmitStruct(
-            FixViewRequest request,
-            FixMessageDef message,
+        private static void CollectQualifiedCandidates(
+            IReadOnlyList<(FixDictionary Schema, string RuntimeNamespace, string Namespace)> schemas,
+            string path,
+            bool messageRoot,
+            List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)> candidates)
+        {
+            foreach (var (schema, runtimeNs, schemaNs) in schemas)
+            {
+                if (FixViewFieldCollector.TryResolveQualifiedScope(schema, path, messageRoot, out var entries, out var name))
+                {
+                    candidates.Add((entries!, name!, runtimeNs, schemaNs));
+                }
+            }
+        }
+
+        private static void CollectGroups(
+            IReadOnlyList<FixMessageDef> messages,
+            string name,
             string runtimeNs,
             string schemaNs,
+            List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)> candidates)
+        {
+            foreach (var message in messages)
+            {
+                CollectGroups(message.Entries, name, runtimeNs, schemaNs, candidates);
+            }
+        }
+
+        private static void CollectGroups(
+            IReadOnlyList<FixEntry> entries,
+            string name,
+            string runtimeNs,
+            string schemaNs,
+            List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)> candidates)
+        {
+            foreach (var entry in entries)
+            {
+                switch (entry)
+                {
+                    case FixGroupRef group:
+                        if (string.Equals(group.Name, name, StringComparison.Ordinal))
+                        {
+                            candidates.Add((group.Entries, group.Name, runtimeNs, schemaNs));
+                        }
+
+                        CollectGroups(group.Entries, name, runtimeNs, schemaNs, candidates);
+                        break;
+                    case FixComponentRef component:
+                        CollectGroups(component.Component.Entries, name, runtimeNs, schemaNs, candidates);
+                        break;
+                }
+            }
+        }
+
+        private static string EmitStruct(
+            FixViewRequest request,
+            string runtimeNs,
+            string schemaNs,
+            IReadOnlyList<FixEntry> scopeEntries,
             List<(FixViewPropertyModel Property, FixFieldDef Field, bool Required)> slots,
             List<(FixViewPropertyModel Property, FixGroupRef Group)> groupSlots)
         {
@@ -219,6 +334,10 @@ namespace FixSourceGenerator.Views
             w.Open($"partial struct {request.StructName}");
 
             string r = $"{runtimeNs}.FixSpanReader";
+            var directGroups = new List<FixGroupRef>();
+            FixViewFieldCollector.CollectDirectGroups(scopeEntries, directGroups);
+            var groupHelperIds = new Dictionary<FixGroupRef, string>();
+            GroupScopeEmitter.AssignIds(directGroups, groupHelperIds);
 
             w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
 
@@ -235,6 +354,11 @@ namespace FixSourceGenerator.Views
                     w.Line($"private readonly bool _{slot.Property.PropertyName}Present;");
                 }
             }
+            foreach (var slot in groupSlots)
+            {
+                w.Line($"private readonly int _{slot.Property.PropertyName}Start;");
+                w.Line($"private readonly int _{slot.Property.PropertyName}Length;");
+            }
 
             w.Line();
             w.Open($"public {request.StructName}(global::System.ReadOnlySpan<byte> buffer)");
@@ -249,25 +373,74 @@ namespace FixSourceGenerator.Views
                     w.Line($"_{slot.Property.PropertyName}Present = false;");
                 }
             }
+            foreach (var slot in groupSlots)
+            {
+                w.Line($"_{slot.Property.PropertyName}Start = 0;");
+                w.Line($"_{slot.Property.PropertyName}Length = 0;");
+            }
 
-            if (slots.Count > 0)
+            if (slots.Count + groupSlots.Count > 0)
             {
                 w.Line();
-                w.Line($"int remaining = {slots.Count};");
+                w.Line($"int remaining = {slots.Count + groupSlots.Count};");
                 w.Line("int pos = 0;");
+
+                // First-occurrence-wins within the early-exit boundary (docs/CONTRACT.md §12.7):
+                // a local "found" flag per requested field, distinct from the `_{Field}Present`
+                // struct field (which tracks value-presence for optional fields, not scan
+                // progress). Without this, a duplicate tag appearing before every requested field
+                // has been located would decrement `remaining` twice for the same slot — either
+                // early-exiting before an unrelated later field is found, or (harmlessly but
+                // incorrectly) overwriting the already-located first occurrence with a later one,
+                // which contradicts the documented "duplicates: first occurrence wins" contract
+                // for early-exit projections (unlike the full/last-occurrence reader in
+                // ReaderEmitter).
+                foreach (var slot in slots)
+                {
+                    w.Line($"bool found{slot.Property.PropertyName} = false;");
+                }
+                foreach (var slot in groupSlots)
+                {
+                    w.Line($"bool found{slot.Property.PropertyName} = false;");
+                }
+
                 w.Open($"while (remaining > 0 && {r}.TryReadField(buffer, pos, out int tag, out int valueStart, out int valueLength, out int nextPos))");
+                foreach (var group in directGroups)
+                {
+                    string groupId = groupHelperIds[group];
+                    w.Open($"if (tag == {group.CounterField.Number})");
+                    w.Open($"if (!{r}.TryParseInt(buffer.Slice(valueStart, valueLength), out int count{groupId}) || !TrySkip{groupId}(buffer, nextPos, count{groupId}, out int end{groupId}))");
+                    w.Line("pos = buffer.Length;");
+                    w.Line("continue;");
+                    w.Close();
+                    foreach (var slot in groupSlots.Where(s => ReferenceEquals(s.Group, group)))
+                    {
+                        w.Open($"if (!found{slot.Property.PropertyName})");
+                        w.Line($"_{slot.Property.PropertyName}Start = pos;");
+                        w.Line($"_{slot.Property.PropertyName}Length = end{groupId} - pos;");
+                        w.Line($"found{slot.Property.PropertyName} = true;");
+                        w.Line("remaining--;");
+                        w.Close();
+                    }
+                    w.Line($"pos = end{groupId};");
+                    w.Line("continue;");
+                    w.Close();
+                }
                 w.Open("switch (tag)");
                 foreach (var slot in slots)
                 {
                     w.Line($"case {slot.Field.Number}:");
-                    w.Line($"    _{slot.Property.PropertyName}Start = valueStart;");
-                    w.Line($"    _{slot.Property.PropertyName}Length = valueLength;");
+                    w.Open($"if (!found{slot.Property.PropertyName})");
+                    w.Line($"_{slot.Property.PropertyName}Start = valueStart;");
+                    w.Line($"_{slot.Property.PropertyName}Length = valueLength;");
                     if (!slot.Required)
                     {
-                        w.Line($"    _{slot.Property.PropertyName}Present = true;");
+                        w.Line($"_{slot.Property.PropertyName}Present = true;");
                     }
-                    w.Line("    remaining--;");
-                    w.Line("    break;");
+                    w.Line($"found{slot.Property.PropertyName} = true;");
+                    w.Line("remaining--;");
+                    w.Close();
+                    w.Line("break;");
                 }
                 w.Close();
                 w.Line("pos = nextPos;");
@@ -288,6 +461,12 @@ namespace FixSourceGenerator.Views
                 EmitGroupPropertyImpl(w, schemaNs, groupSlot.Property, groupSlot.Group);
             }
 
+            var emittedGroupHelpers = new HashSet<FixGroupRef>();
+            foreach (var group in directGroups)
+            {
+                GroupScopeEmitter.EmitSkipHelper(w, runtimeNs, group, groupHelperIds, emittedGroupHelpers);
+            }
+
             w.Close(); // struct
 
             if (hasNamespace)
@@ -299,17 +478,13 @@ namespace FixSourceGenerator.Views
         }
 
         /// <summary>
-        /// Exposes a whole repeating group via the same <c>{Group}GroupReader</c> type the full
-        /// message reader already emits for this message (issue #17). No Start/Length/Present
-        /// slot is needed — like the full reader's own group property, this simply wraps the
-        /// entire buffer; the group reader's own lazy scan (via <c>FixGroupEnumerator</c>) finds
-        /// the counter/entries on demand. This is why groups don't participate in the scanning
-        /// constructor's early-exit switch/`remaining` count above.
+        /// Restricts group lookup to the counter and entries located in this scope.
         /// </summary>
         private static void EmitGroupPropertyImpl(CodeWriter w, string schemaNs, FixViewPropertyModel property, FixGroupRef group)
         {
             string groupReaderType = $"{schemaNs}.{group.Name.ToIdentifier()}GroupReader";
-            w.Line($"public partial {groupReaderType} {property.PropertyName} {{ get => new {groupReaderType}(_buffer); }}");
+            string slice = $"_buffer.Slice(_{property.PropertyName}Start, _{property.PropertyName}Length)";
+            w.Line($"public partial {groupReaderType} {property.PropertyName} {{ get => new {groupReaderType}({slice}); }}");
         }
 
         private static void EmitPropertyImpl(CodeWriter w, string runtimeNs, FixViewPropertyModel property, FixFieldDef field, bool required)
@@ -328,6 +503,10 @@ namespace FixSourceGenerator.Views
             if (declaredType == "ReadOnlySpan<byte>")
             {
                 w.Line($"public partial global::System.ReadOnlySpan<byte> {prop} {{ get => {valueExpr}; }}");
+                if (!required)
+                {
+                    w.Line($"public bool TryGet{prop}(out global::System.ReadOnlySpan<byte> value) {{ value = {valueExpr}; return {presentField}; }}");
+                }
                 return;
             }
 

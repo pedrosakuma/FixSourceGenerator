@@ -400,12 +400,16 @@ namespace __NS__.Runtime
     /// are supplied by the generated code (known at compile time — no runtime dictionary lookup),
     /// which is what makes repeating groups allocation-minimal (docs/CONTRACT.md §6).
     /// </summary>
+    // Returns zero for a scalar, one for a skipped nested group, and minus one for malformed input.
+    internal delegate int FixNestedGroupSkipper(ReadOnlySpan<byte> buffer, int tag, int valueStart, int valueLength, int next, out int end);
+
     public ref struct FixGroupEnumerator
     {
         private readonly ReadOnlySpan<byte> _buffer;
         private readonly ReadOnlySpan<int> _entryTags;
         private readonly int _delimiterTag;
         private readonly bool _binarySearch;
+        private readonly FixNestedGroupSkipper? _nestedGroupSkipper;
         private int _position;
         private int _remaining;
         private ReadOnlySpan<byte> _current;
@@ -415,12 +419,13 @@ namespace __NS__.Runtime
         {
         }
 
-        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags)
+        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags, FixNestedGroupSkipper? nestedGroupSkipper = null)
         {
             _buffer = buffer;
             _entryTags = entryTags;
             _delimiterTag = delimiterTag;
             _binarySearch = sortedEntryTags && entryTags.Length > 16;
+            _nestedGroupSkipper = nestedGroupSkipper;
             _current = default;
             _remaining = 0;
             _position = buffer.Length;
@@ -448,7 +453,7 @@ namespace __NS__.Runtime
                 return false;
             }
 
-            if (!FixSpanReader.TryReadField(_buffer, _position, out int tag, out _, out _, out int afterDelimiter) || tag != _delimiterTag)
+            if (!FixSpanReader.TryReadField(_buffer, _position, out int tag, out int firstValueStart, out int firstValueLength, out int afterDelimiter) || tag != _delimiterTag)
             {
                 _remaining = 0;
                 return false;
@@ -456,13 +461,39 @@ namespace __NS__.Runtime
 
             int entryStart = _position;
             int cursor = afterDelimiter;
-            while (FixSpanReader.TryReadField(_buffer, cursor, out int nextTag, out _, out _, out int next))
+            if (_nestedGroupSkipper != null)
+            {
+                int skipped = _nestedGroupSkipper(_buffer, tag, firstValueStart, firstValueLength, afterDelimiter, out int end);
+                if (skipped < 0)
+                {
+                    _remaining = 0;
+                    _current = default;
+                    return false;
+                }
+                if (skipped > 0)
+                    cursor = end;
+            }
+            while (FixSpanReader.TryReadField(_buffer, cursor, out int nextTag, out int valueStart, out int valueLength, out int next))
             {
                 if (nextTag == _delimiterTag || !Contains(nextTag))
                 {
                     break;
                 }
-
+                if (_nestedGroupSkipper != null)
+                {
+                    int skipped = _nestedGroupSkipper(_buffer, nextTag, valueStart, valueLength, next, out int end);
+                    if (skipped < 0)
+                    {
+                        _remaining = 0;
+                        _current = default;
+                        return false;
+                    }
+                    if (skipped > 0)
+                    {
+                        cursor = end;
+                        continue;
+                    }
+                }
                 cursor = next;
             }
 

@@ -429,14 +429,61 @@ tipo exatamente `{Group}GroupReader` — sem variantes nullable/span, já que um
 como reader (`Count` pode ser 0 se ausente). Qualquer outro tipo declarado é rejeitado com FIX014
 (ver §8).
 
-Grupos como propriedade (issue #17): o construtor de scan early-exit **não** rastreia grupos — a
-propriedade apenas envolve o buffer inteiro com `new {Group}GroupReader(_buffer)`, igual ao reader
-completo faz. Isso é possível porque `{Group}GroupReader`/`FixGroupEnumerator` já fazem sua própria
-busca preguiçosa pelo counter/entradas sob demanda (§2/§6); a view não precisa localizar o grupo
-antecipadamente, então ele não conta para o `remaining` do early-exit nem aparece no `switch` da
-scan. Campos individuais **dentro** de um grupo continuam fora de escopo — não há valor escalar
-único a expor para uma repetição 0..N; use uma segunda `[FixView]` sobre o tipo de entrada gerado
-pelo próprio reader completo, se precisar de projeção seletiva também dentro do grupo.
+Grupos como propriedade: a view localiza o counter e delimita as entradas no escopo correto,
+armazenando dois offsets por grupo solicitado. O grupo participa do early-exit; o getter envolve
+apenas esse trecho com `{Group}GroupReader`, não o buffer inteiro. Isso evita localizar um counter
+homônimo dentro de outro grupo. Essa localização tem custo, além da enumeração posterior, e deve
+ser incluída nas medições. Campos individuais de uma repetição 0..N não são escalares da mensagem;
+use uma segunda `[FixView]` direcionada ao escopo da entrada.
+
+Escopo além de mensagem (issue #32): um nome simples é resolvido na ordem mensagem, componente,
+grupo. Mensagens preservam a seleção histórica do primeiro schema carregado; componentes/grupos
+repetidos entre schemas ou ocorrências são ambíguos. Caminhos pontuados distinguem ocorrências e
+preservam a propriedade lógica, por exemplo
+`MarketDataIncrementalRefresh.MDIncGrp.NoMDEntries` e
+`MarketDataSnapshotFullRefresh.MDFullGrp.NoMDEntries`. Cada segmento depois da raiz deve ser um
+componente ou grupo diretamente pertencente ao escopo anterior.
+Se o mesmo caminho resolver em mais de um schema carregado, FIX016 continua sendo emitido;
+esta forma de qualificação não seleciona uma versão de schema.
+
+`Enumerator.CurrentSpan` expõe o span já delimitado da entrada para construir a view seletiva sem
+construir e escanear o entry reader completo:
+
+Quando tags aninhadas reutilizam o delimitador do pai, o enumerador gerado fornece ao runtime
+um callback estático de delimitação por topologia. Isso evita cortar a entrada no delimitador
+do filho; o callback é compartilhado por tipo, não criado por entrada. Os construtores existentes
+do enumerador de runtime sem metadata de topologia mantêm seu comportamento anterior.
+
+```csharp
+foreach (var groupReader in message.NoPartyIDs) { } // reader completo, se precisar de tudo
+
+var enumerator = message.NoPartyIDs.GetEnumerator();
+while (enumerator.MoveNext())
+{
+    var partyIdOnly = new PartyIdOnlyView(enumerator.CurrentSpan); // só localiza PartyID
+}
+```
+
+**Ambiguidade (FIX016):** mais de um componente/grupo elegível para o mesmo alvo simples produz
+`FIX016`, independentemente de as formas serem iguais. Use um caminho qualificado; o generator não
+seleciona nem une ocorrências por nome.
+
+Ao escanear um escopo, counters de grupos filhos estabelecem regiões aninhadas. A view pula a
+quantidade declarada usando delimitador, membership e a topologia recursiva do schema antes de
+continuar o scan do pai. Counts negativos, curtos, excessivos ou sem delimitador encerram o scan
+com segurança; uma tag desconhecida fora da membership estabelece o limite normal do grupo.
+
+**Primeira ocorrência vence em duplicatas (early-exit):** a exemplo do reader completo (que sempre
+usa a *última* ocorrência de uma tag duplicada, §2), a view com early-exit usa a **primeira**
+ocorrência dentro do escopo aplicável — uma tag duplicada antes do fechamento do early-exit não
+deve impedir localizar os campos restantes solicitados, nem sobrescrever o valor já localizado.
+Isso não é validação estrita de FIX (duplicatas continuam sendo aceitas silenciosamente); é
+apenas a semântica de localização usada pela projeção.
+
+Campos dentro de componentes opcionais são opcionais no contexto, mesmo quando `required="Y"` na
+definição do componente. Para spans opcionais, a propriedade continua retornando span vazio como
+conveniência e `TryGet{Property}(out ReadOnlySpan<byte>)` distingue ausência de valor presente e
+explicitamente vazio.
 
 Requisitos e limitações (v1):
 - A struct anotada deve ser `partial ref struct` (FIX011) — a implementação armazena um campo
@@ -444,9 +491,12 @@ Requisitos e limitações (v1):
 - **Exige C# 13 / SDK net9+ do lado do consumidor** (propriedades `partial`), diferente do resto
   do gerador (readers/writers só exigem net6+, §4). Se o consumidor não puder subir para net9+,
   use o reader completo (§2) em vez de `[FixView]`.
-- Um `[FixView]` = uma mensagem (`MsgType`); não há views multi-mensagem.
-- Campos individuais dentro de um grupo não são "achatados" para dentro de uma view — fora de
-  escopo (issue #17 só permite expor o grupo inteiro via seu `{Group}GroupReader`).
+- Um `[FixView]` = um escopo só (mensagem, componente OU grupo, issue #32); não há views que
+  combinem múltiplos escopos.
+- Campos individuais dentro de um grupo não são "achatados" para dentro de uma view de
+  **mensagem** — fora de escopo (issue #17 só permite expor o grupo inteiro via seu
+  `{Group}GroupReader` a partir de uma view de mensagem). Para projetar campos de dentro de um
+  grupo, aponte o `[FixView]` diretamente para o nome do grupo (ver acima, issue #32).
 - A resolução de tipo é feita por comparação **textual** do tipo declarado (não por
   `ITypeSymbol` resolvido), porque um tipo enum gerado pelo próprio generator nessa mesma
   passagem incremental ainda não existe como metadata resolvível — casar pelo texto evita esse
