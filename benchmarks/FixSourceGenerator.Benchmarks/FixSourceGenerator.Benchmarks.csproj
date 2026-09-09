@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FixSourceGenerator\FixSourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <AdditionalFiles Include="Schema\FIX44-mini.xml" />
+    <AdditionalFiles Include="../../tests/FixSourceGenerator.Tests/TestData/FIX50SP2.xml" />
     <!-- Referencing the generator via ProjectReference (rather than the NuGet package) means
          buildTransitive/FixSourceGenerator.props isn't applied, so CompilerVisibleProperty must
          be declared here directly for FixGeneratorNamespace to reach the generator. -->

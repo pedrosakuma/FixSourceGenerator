@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Globalization;
 using FixSourceGenerator.Schema;
 
 namespace FixSourceGenerator.Generators
@@ -118,7 +119,7 @@ namespace FixSourceGenerator.Generators
 
         private void EmitWriteMethod(CodeWriter w, FixFieldDef field, string method, bool isGroupCounter)
         {
-            int tag = field.Number;
+            string tag = "\"" + field.Number.ToString(CultureInfo.InvariantCulture) + "=\"u8";
             var translated = TypeTranslator.Translate(field.Type);
 
             // Group counter (NUMINGROUP) fields are structural, not semantic values — even when a
@@ -159,11 +160,16 @@ namespace FixSourceGenerator.Generators
                     paramType = "global::System.TimeOnly";
                     break;
                 default:
-                    paramType = "global::System.ReadOnlySpan<byte>";
+                    paramType = "scoped global::System.ReadOnlySpan<byte>";
                     break;
             }
 
             w.Line($"public void {method}({paramType} value) => _writer.WriteField({tag}, value);");
+            if (translated.Category == FixTypeCategory.Decimal)
+            {
+                w.Line($"public void {method}(long value) => _writer.WriteField({tag}, value);");
+                w.Line($"public void {method}(long mantissa, int scale) => _writer.WriteField({tag}, mantissa, scale);");
+            }
         }
 
         private static void Flatten(IReadOnlyList<FixEntry> entries, List<(FixFieldDef Field, bool IsGroupCounter)> into)

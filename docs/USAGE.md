@@ -22,8 +22,10 @@ are not C# source):
 `PrivateAssets="all"` is recommended (standard for source generators/analyzers) so the generator
 itself isn't exposed as a dependency of your published package.
 
-The generator targets consuming code at **.NET 6+** (it emits `DateOnly`/`TimeOnly` for FIX date/
-time fields, and `u8` string literals in the runtime helpers) — the generator's own `netstandard2.0`
+The generator targets consuming code at **.NET 6+ with C# 11+** (it emits `DateOnly`/`TimeOnly`
+for FIX date/time fields, `u8` string literals, and `scoped` input spans). When targeting .NET 6,
+use a compiler supporting C# 11 and set `<LangVersion>11</LangVersion>`.
+The generator's own `netstandard2.0`
 target is only a Roslyn hosting requirement and has no bearing on what TFM your project uses.
 
 ## 2. Namespace
@@ -144,6 +146,105 @@ writer.WriteAllocQty(100m);
 int messageLength = writer.Finish(); // backpatches BodyLength (tag 9) and CheckSum (tag 10)
 SendOverSocket(destination.Slice(0, messageLength));
 ```
+
+### Destination capacity and failures
+
+The constructor, field setters (including group counters), and `Finish()` throw
+`ArgumentException` with `ParamName == "destination"` when the caller's buffer is too small.
+After a failed operation, the writer is **invalid**: subsequent writes, `BeginMessage()`, and
+`Finish()` throw `InvalidOperationException`. Discard the partial contents and construct a
+new writer over a sufficiently large buffer; never send a buffer from a failed write.
+Writes are not transactional: a failed field may already have changed bytes or the cursor.
+`Finish()` checks capacity for both the BodyLength shift and the complete checksum before
+changing the frame.
+
+Capacity must accommodate the intermediate six-digit BodyLength placeholder, not just the
+final frame size. `Finish()` removes unused placeholder digits (or expands beyond six digits),
+then appends the seven-byte `10=ddd<SOH>` field. The library does not rent, grow, or own buffers,
+and successful writes remain allocation-free.
+
+### Stack-based identifiers
+
+Byte-span setters and the runtime's `WriteField` / `BeginMessage` use
+`scoped ReadOnlySpan<byte>` for inputs: bytes are copied immediately, never retained. This also
+works from helpers receiving the writer by reference, including flattened group setters:
+
+```csharp
+using System;
+using System.Buffers.Text;
+using Acme.Fix.V44;
+
+static int Encode(Span<byte> destination, long orderId, long accountId)
+{
+    var writer = new NewOrderSingleWriter(destination);
+    Span<byte> scratch = stackalloc byte[20]; // sufficient even for long.MinValue
+    if (!Utf8Formatter.TryFormat(orderId, scratch, out int written))
+        throw new InvalidOperationException("Order ID formatting failed.");
+    writer.WriteClOrdID(scratch[..written]);
+    writer.WriteSide(Side.Buy);
+    writer.WriteOrderQty(100m);
+    writer.WriteSymbol("MSFT"u8);
+    WriteAllocation(ref writer, accountId);
+    return writer.Finish();
+}
+
+static void WriteAllocation(ref NewOrderSingleWriter writer, long accountId)
+{
+    Span<byte> scratch = stackalloc byte[20];
+    if (!Utf8Formatter.TryFormat(accountId, scratch, out int written))
+        throw new InvalidOperationException("Account ID formatting failed.");
+    writer.WriteNoAllocs(1);
+    writer.WriteAllocAccount(scratch[..written]);
+    writer.WriteAllocQty(100m);
+    scratch.Clear(); // does not change bytes already copied into the destination
+}
+```
+
+The destination span is still retained by the writer and must outlive its use. Reader spans,
+which reference their original input, keep their existing lifetime contracts.
+
+### Integral and scaled numeric values
+
+For `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, and `PERCENTAGE`, generated writers expose
+three overloads. Readers still return `decimal` / `decimal?` and the original decimal setter
+is unchanged:
+
+```csharp
+writer.WritePrice(123.4500m);     // existing decimal API: 44=123.4500
+writer.WritePrice(1234500L, 4);   // mantissa * 10^-scale: 44=123.4500
+writer.WriteOrderQty(1000L);     // integral quantity, without conversion to decimal
+```
+
+The scaled overload accepts a signed `long` mantissa and a scale from **0 through 18**
+(inclusive). It preserves exactly that many fractional digits, including trailing zeros:
+`(0L, 4)` emits `0.0000`, `(-1L, 4)` emits `-0.0001`, and `(long.MinValue, 18)` emits
+`-9.223372036854775808`. Formatting is invariant ASCII, without scientific notation.
+An unsupported scale throws `ArgumentOutOfRangeException` (`ParamName == "scale"`) before
+writing that field and invalidates the writer, just like a capacity failure.
+
+Existing `int` and `long` arguments resolve to the integral overload for decimal fields;
+`decimal` arguments continue to resolve to the decimal overload, retaining fractional support.
+FIX `INT` fields and group counters remain `int`; STRING identifiers do not acquire numeric
+setters. The same formatting is available through runtime `WriteField(int tag, long value)`
+and `WriteField(int tag, long mantissa, int scale)`.
+
+### Temporal formatting and timezone semantics
+
+Temporal setters write digits directly into the byte destination:
+
+| API type | Wire format |
+|----------|-------------|
+| `DateTime` | `yyyyMMdd-HH:mm:ss.fff` |
+| `DateOnly` | `yyyyMMdd` |
+| `TimeOnly` | `HH:mm:ss.fff` |
+
+These formats are culture-independent, zero-padded, and keep exactly three fractional
+second digits. Sub-millisecond ticks are **truncated**, not rounded; no rollover is introduced.
+For compatibility with the original writer, `DateTime` writes the supplied calendar/clock
+fields **without converting its `Kind`**. For UTC FIX fields, supply a UTC value (convert
+explicitly before calling the setter if needed). The reader's UTC parsing behavior is
+unchanged. TZ types continue to use the same mapped format; this update does not add offsets
+or change precision.
 
 > **Note on the writer and groups (v1 pragmatic decision):** unlike the reader, which exposes
 > components/groups as nested sub-readers, the *writer* flattens component and group fields
