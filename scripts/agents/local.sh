@@ -5,6 +5,7 @@ usage() {
     printf '%s\n' \
         'Usage: scripts/agents/local.sh prepare ISSUE BASE_REF MODEL' \
         '       scripts/agents/local.sh run ISSUE' \
+        '       scripts/agents/local.sh revise ISSUE SESSION_ID FEEDBACK_FILE [MODEL]' \
         '       scripts/agents/local.sh status ISSUE' \
         'prepare creates a pinned worktree and prompt; run stays in the foreground.' \
         'Agents leave changes for review; they may not commit, push or create PRs.'
@@ -20,6 +21,7 @@ issue=$2
 case $action in
     prepare) [[ $# == 4 ]] || fail 'prepare requires ISSUE BASE_REF MODEL.' ;;
     run|status) [[ $# == 2 ]] || fail "$action requires ISSUE only." ;;
+    revise) [[ $# == 4 || $# == 5 ]] || fail 'revise requires ISSUE SESSION_ID FEEDBACK_FILE [MODEL].' ;;
     *) fail "Unknown action: $action" ;;
 esac
 
@@ -35,7 +37,9 @@ if [[ $action == status ]]; then
     for name in base model branch pid exit-code; do
         if [[ -f "$state/$name" ]]; then printf '%s=%s\n' "$name" "$(<"$state/$name")"; fi
     done
-    printf 'output=%s/output.log\n' "$state"
+    output=$state
+    if [[ -f "$state/latest-output" ]]; then output=$(<"$state/latest-output"); fi
+    printf 'output=%s/output.log\n' "$output"
     exit 0
 fi
 
@@ -98,9 +102,39 @@ fi
 [[ -f "$state/prompt.txt" && -d "$worktree" ]] || fail "Issue $issue has not been prepared."
 exec 9>"$state/run.lock"
 flock -n 9 || fail "Issue $issue already has a running executor."
-[[ $(<"$state/status") == prepared ]] || fail "Expected prepared state; inspect $(<"$state/status") before retrying."
 [[ $(git -C "$worktree" rev-parse HEAD) == "$(<"$state/base")" ]] || fail 'Worktree HEAD no longer matches its pinned base.'
-[[ -z $(git -C "$worktree" status --porcelain) ]] || fail 'Prepared worktree is no longer clean.'
+model=$(<"$state/model")
+output=$state
+prompt="$state/prompt.txt"
+session_args=(--name "FixSourceGenerator issue $issue")
+if [[ $action == run ]]; then
+    [[ $(<"$state/status") == prepared ]] || fail "Expected prepared state; inspect $(<"$state/status") before retrying."
+    [[ -z $(git -C "$worktree" status --porcelain) ]] || fail 'Prepared worktree is no longer clean.'
+else
+    [[ $(<"$state/status") == needs-review ]] || fail 'Only a completed, inspected delivery can be revised.'
+    [[ $3 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+        || fail 'SESSION_ID must be the completed local CLI session UUID.'
+    previous_output=$state
+    if [[ -f "$state/latest-output" ]]; then previous_output=$(<"$state/latest-output"); fi
+    grep -Eq "^Resume[[:space:]]+copilot --resume=$3[[:space:]]*$" "$previous_output/output.log" \
+        || fail 'SESSION_ID does not match the completed output for this issue.'
+    [[ -f $4 && -r $4 && -s $4 ]] || fail 'FEEDBACK_FILE must be a readable, non-empty file.'
+    model=${5:-$model}
+    [[ $model =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail 'Invalid model identifier.'
+    output=$(mktemp -d "$state/revision.XXXXXX")
+    cp -- "$4" "$output/feedback.txt"
+    {
+        cat "$state/prompt.txt"
+        printf '\nIntegrator review: revise the existing uncommitted delivery, preserving unrelated work.\n'
+        cat "$output/feedback.txt"
+    } > "$output/prompt.txt"
+    prompt="$output/prompt.txt"
+    printf '%s\n' "$(<"$state/model")" > "$output/previous-model"
+    printf '%s\n' "$3" > "$output/resumed-session"
+    session_args=(--resume "$3")
+fi
+printf '%s\n' "$model" > "$state/model"
+printf '%s\n' "$output" > "$state/latest-output"
 printf 'running\n' > "$state/status"
 printf '%s\n' "$$" > "$state/pid"
 finish() {
@@ -109,11 +143,11 @@ finish() {
     if [[ $code == 0 ]]; then printf 'needs-review\n'; else printf 'failed\n'; fi > "$state/status"
 }
 trap finish EXIT
-printf 'Running local issue #%s; output: %s/output.log\n' "$issue" "$state"
+printf 'Running local issue #%s; output: %s/output.log\n' "$issue" "$output"
 cd "$worktree"
 copilot --no-auto-update --no-remote --no-remote-export --disable-builtin-mcps \
-    --no-ask-user --model "$(<"$state/model")" --name "FixSourceGenerator issue $issue" \
-    --log-dir "$state/logs" --usage-output-file "$state/usage.json" \
+    --no-ask-user --model "$model" "${session_args[@]}" \
+    --log-dir "$output/logs" --usage-output-file "$output/usage.json" \
     --allow-tool=write --allow-tool='shell(dotnet:*)' --allow-tool='shell(rg:*)' \
     --allow-tool='shell(ls:*)' --allow-tool='shell(pwd)' \
     --allow-tool='shell(git status)' --allow-tool='shell(git diff)' \
@@ -123,5 +157,5 @@ copilot --no-auto-update --no-remote --no-remote-export --disable-builtin-mcps \
     --deny-tool='shell(git push)' --deny-tool='shell(git commit)' \
     --deny-tool='shell(git reset)' --deny-tool='shell(git clean)' \
     --deny-tool='shell(git worktree)' \
-    --prompt "$(<"$state/prompt.txt")" > "$state/output.log" 2>&1
-git status --short > "$state/changes.txt"
+    --prompt "$(<"$prompt")" > "$output/output.log" 2>&1
+git status --short > "$output/changes.txt"
