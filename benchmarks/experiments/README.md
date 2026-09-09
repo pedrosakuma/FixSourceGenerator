@@ -1,8 +1,10 @@
 # Reproducing the reader experiments
 
 These are experimental patches and probes, not active production optimizations.
-The baseline keeps the binary group-membership implementation and the original temporal
-reader parsers. Results, caveats and BenchmarkDotNet commands are recorded in
+The recorded prework baseline (`a0b1aab`) keeps binary group membership and the original
+temporal reader parsers. The temporal fast path has since been integrated by #30; apply
+the archived temporal patch only to a worktree at that prework baseline, not on top of
+the integrated implementation. Results, caveats and BenchmarkDotNet commands are recorded in
 `../FixSourceGenerator.Benchmarks/README.md`.
 
 Use separate worktrees from the same baseline commit for every variant. Do not apply a
@@ -11,7 +13,7 @@ individual effect. Preserve a clean baseline worktree for comparison.
 
 ## Temporal reader (#30)
 
-From the experimental worktree root:
+From an experimental worktree rooted at prework commit `a0b1aab`:
 
 ```bash
 git apply --check benchmarks/experiments/temporal-reader/fast-path.patch

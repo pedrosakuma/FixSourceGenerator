@@ -513,6 +513,11 @@ for every entry, while W accesses it once at message level. These counts are dis
 
 ### Isolated temporal ASCII fast-path experiment
 
+**Implementation status:** #30 promotes this temporal fast path into the generated runtime.
+The investigation below describes the original isolated experiment against prework baseline
+`a0b1aab`, not a claim that the current runtime still uses only the original parser. Its
+historical timings are not new measurements of the integrated change.
+
 An isolated source copy adds a checked ASCII fast path to the existing temporal runtime parsers:
 `yyyyMMdd`, `HH:mm:ss[.fff]`, and `yyyyMMdd-HH:mm:ss[.fff]`. It checks digits, separators, calendar
 day validity and time ranges before constructing the value; timestamps retain UTC Kind.
