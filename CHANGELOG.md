@@ -12,6 +12,11 @@ versions until `1.0.0`.
   operations with `InvalidOperationException`, preventing malformed success-shaped frames (#23).
 
 ### Added
+- Scoped reader/writer API contract design (docs/CONTRACT.md §12) for the next-generation
+  generated shape: per-scope required constructors/factories, optional-component/required-group
+  contextual requiredness, group-count policy comparison (upfront count vs. backpatch), and
+  selective-projection reuse of `[FixView]`'s early-exit model. Prototyped (not wired into the
+  generator) in `tests/FixSourceGenerator.Tests/ScopedApiContractExamples*.cs` (#29).
 - `scoped` byte-span inputs on generated setters and runtime writer APIs, allowing local
   `stackalloc` identifiers through by-reference helpers and repeating-group fields without
   retaining scratch memory. Consumers remain .NET 6+ with C# 11+ (#26).

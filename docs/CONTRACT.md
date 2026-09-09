@@ -451,3 +451,362 @@ Requisitos e limitações (v1):
   `ITypeSymbol` resolvido), porque um tipo enum gerado pelo próprio generator nessa mesma
   passagem incremental ainda não existe como metadata resolvível — casar pelo texto evita esse
   problema de auto-referência.
+
+## 12. Contrato de API `ref struct` por escopo (issue #29, **PROPOSTO — não implementado**)
+
+> **Status:** este é o design para a *próxima* geração de reader/writer, bloqueado pelo
+> checklist de consolidação da baseline (#28) e produzido em paralelo ao fast path do reader
+> temporal (#30). **Nada aqui está implementado em `WriterEmitter.cs`/`ReaderEmitter.cs`** — o
+> writer gerado continua achatado (§2.2/§6, um único `{Message}Writer` com `Write{Field}` por
+> campo, contador de grupo como `int` manual) e o reader gerado continua o eager-scan de §2.1/§11
+> tal como documentado. Cada bullet abaixo rotula explicitamente **Atual** (o que já existe e
+> continua valendo até que um issue de implementação separado mude isso) vs. **Proposto** (a
+> direção de API cujas partes foram prototipadas separadamente em
+> `tests/FixSourceGenerator.Tests/ScopedApiContractExamples.cs` +
+> `ScopedApiContractExamplesTests.cs` — exemplos limitados que compilam e operam sobre fragmentos
+> de corpo, sem envelope FIX nem validação completa do protocolo e sem depender do generator).
+> Eles não constituem uma implementação integrada de todos os shapes abaixo. Este documento define o contrato e os
+> spikes de viabilidade; a reescrita completa de `WriterEmitter.cs`/`ReaderEmitter.cs` fica para
+> issues de implementação subsequentes, coordenados por um único dono de integração (§12.9).
+
+### 12.1 Onde vivem os inputs obrigatórios (required-by-scope, não um construtor gigante)
+
+**Atual:** `{Message}Writer` tem um único construtor `(Span<byte> destination)` — nenhum campo é
+obrigatório na assinatura; toda obrigatoriedade é responsabilidade do chamador lembrar de chamar
+o `Write{Field}` certo, sem checagem em tempo de compilação nem de execução.
+
+**Proposto:** cada **escopo** (mensagem, componente, entrada de grupo) expõe seus próprios campos
+obrigatórios como parâmetros do construtor/factory *daquele* escopo — nunca como parâmetro
+transitivo de um construtor de mensagem que também carregasse os campos obrigatórios de
+componentes/grupos aninhados. Concretamente (ver `ProtoOrderWriter`/`ProtoInstrumentWriter` no
+spike):
+
+- O construtor da mensagem recebe apenas os campos obrigatórios *da própria mensagem* que vêm
+  antes do primeiro sub-escopo obrigatório no wire (ex.: `ClOrdID`).
+- Entrar num componente/grupo obrigatório é uma chamada `Begin{Scope}(...)` que já exige, como
+  parâmetros, os campos obrigatórios *daquele* sub-escopo (ex.: `BeginInstrument(symbol)` — não
+  existe `InstrumentWriter` "vazio" que ainda precise de `Symbol` depois).
+- Fechar o sub-escopo (`End{Scope}(...)`) pode, na mesma chamada, já receber a próxima rajada de
+  campos obrigatórios da mensagem-pai que vêm em seguida no wire (`EndInstrument(side, orderQty,
+  ordType)`) — resolvendo a intercalação de campos obrigatórios/opcionais descrita em §12.5 sem
+  expor três chamadas independentes que o chamador poderia invocar fora de ordem.
+- Cada `Begin{Scope}`/`End{Scope}` retorna um **tipo C# diferente** (typestate) que só expõe os
+  membros válidos para a fase seguinte — o compilador rejeita a maior parte do uso incorreto
+  (ex.: escrever um campo opcional do corpo antes de fechar o componente obrigatório) só por
+  não existir tal método no tipo da fase atual.
+
+Trade-off consciente: isso significa **mais tipos gerados** (um por fase de cada mensagem/
+componente/grupo com sub-escopos obrigatórios) comparado ao writer único e achatado de hoje —
+custo de código gerado maior. O compilador restringe as transições disponíveis; validade dos
+valores, cópias, duplicatas e restrições não representadas nas fases ainda exigem runtime.
+
+### 12.2 Omissão vs. zero vs. `false` vs. span vazio explícito
+
+**Atual:** já resolvido e implementado para o reader (§4/§2.1) — campo opcional escalar retorna
+`T?`, campo opcional span expõe `TryGet{Field}(out ReadOnlySpan<byte>)`; ambos distinguem
+"ausente" de "presente porém vazio/zero/false" via um flag `_{campo}Present` guardado à parte do
+`Start`/`Length`. **Isso não muda** — o spike só estende a mesma distinção para o *writer* e para
+grupos (que hoje não têm um construtor scoped no writer):
+
+- **Proposto (campo escalar/span opcional):** simplesmente não chamar o `Write{Field}`/
+  `WriteSecurityID` correspondente — omissão é "nunca escrever o tag", não "escrever um valor
+  sentinela". Chamar com `0`/`false` escreve o valor literal quando permitido pela regra do
+  campo. Um valor inválido, inclusive vazio, deve falhar explicitamente, nunca virar omissão.
+- **Validação não é inferida só de `required="Y"`:** parâmetro obrigatório garante presença da
+  chamada, não validade do valor. Campos lexicais requeridos cuja regra aplicável proíbe vazio
+  lançam `ArgumentException`; enums/códigos e ranges explicitamente conhecidos lançam
+  `ArgumentOutOfRangeException`. A proposta rejeita texto vazio por padrão, mesmo opcional;
+  qualquer exceção exige uma regra explícita do campo, não apenas `required="N"`.
+  O spike rejeita `ClOrdID`/`Symbol`/`SecurityID` vazios e usa domínios ilustrativos para
+  `Side`/`OrdType` e `OrderQty > 0`; esses domínios não são regras universais inferíveis dos
+  tipos FIX. O reader permissivo continua distinguindo um campo vazio recebido de ausência,
+  sem declarar esse valor válido. O emitter futuro deve obter cada regra do
+  tipo/campo/dicionário ou de política explícita; não deve universalizar "required"
+  como "não vazio" nem "NUMINGROUP requerido" como contagem estritamente positiva.
+- **Proposto (grupo opcional):** nunca chamar `Begin{Group}()` ⇒ o tag `NUMINGROUP` nunca aparece
+  no wire (ausência). Chamar `Begin{Group}()` e fechar sem nenhuma entrada ⇒ `NUMINGROUP=0`
+  aparece explicitamente (zero explícito), **somente se a regra aplicável aceitar zero**; caso
+  contrário, o fechamento falha. O spike usa um grupo ilustrativo que aceita zero.
+  As duas coisas produzem `Count == 0` do lado do reader
+  pela API de conveniência, mas são bytes diferentes no wire e diferenciáveis por uma segunda
+  API de leitura ciente de presença — ver `ProtoPartyGroupReader.TryGetCount(out int)` no spike,
+  testado em `OmittedGroup_IsAbsent_NotZero_OnTheWire` e
+  `ExplicitEmptyGroup_WritesZero_DistinctFromOmission`. **Decisão proposta:** o reader gerado
+  deveria expor as duas formas (`Count` de conveniência + `TryGetCount` ciente de presença), não
+  só `Count`, já que a distinção é observável e alguns consumidores (auditoria/conformidade)
+  podem precisar dela.
+
+### 12.3 Obrigatoriedade contextual: componente opcional com filhos obrigatórios; grupo obrigatório não totalmente suprível na construção
+
+- **Componente opcional com filho(s) obrigatório(s):** quando todos os campos obrigatórios do
+  componente são conhecidos estaticamente (não são, eles mesmos, um sub-escopo com cardinalidade
+  variável), a chamada `Begin{Component}(...)` colapsa naturalmente para um único parâmetro-list
+  — ex. um componente opcional `Stipulations` cujo único filho obrigatório é `StipulationType`
+  vira `BeginStipulations(stipulationType)`; nunca chamar essa API é a omissão do componente
+  inteiro, chamá-la já garante seu filho obrigatório. Não há caso especial de codegen além do já
+  descrito em §12.1.
+- **Grupo obrigatório cuja regra aplicável exige ≥1 entrada:** C# consegue representar este
+  typestate: `EmptyGroupWriter.AddEntry(...)` retorna `NonEmptyGroupWriter`, e só o segundo tipo
+  expõe `EndGroup()`. Isso acrescenta tipos/transições e ainda não resolve cópias obsoletas.
+  Alternativamente, um único tipo valida `_count >= 1` em runtime. **Recomendação:** usar a
+  validação em runtime no primeiro emitter escopado, com erro explícito, e reservar o typestate
+  vazio/não-vazio para dicionários que realmente declarem cardinalidade mínima. `required="Y"`
+  por si só exige presença do campo contador; não se presume aqui que sempre implica valor > 0.
+
+### 12.4 Ciclo de vida do handle do writer: fechamento, acesso ao pai durante filho ativo, fechamento repetido, handle obsoleto/copiado, propagação de falha
+
+Typestate sozinho não torna um `ref struct` linear: uma cópia anterior conserva posição e estado
+por valor. Também não é correto usar `Utf8JsonWriter` como precedente: ele é uma classe. Portanto,
+**corrupção silenciosa por handle copiado é bloqueadora para um writer escopado de produção**.
+
+O spike `ProtoSafeWriterOwner` demonstra uma alternativa limitada e segura sem mudar o wire:
+o chamador fornece `Span<int>` de três posições (status, epoch, posição). Todos os handles
+guardam esse mesmo span e seu epoch esperado. Cada transição incrementa o epoch compartilhado
+e consome o handle de origem, entregando o novo epoch apenas ao handle retornado;
+uma cópia obsoleta, fechamento repetido, acesso ao pai durante filho ativo e handle `default`
+lançam `InvalidOperationException`. Falha de capacidade ou validação marca status `failed`,
+incrementa o epoch e envenena todas as cópias. Não há rollback: os bytes parciais devem ser
+descartados. Uso de handle obsoleto é rejeitado antes de alterar bytes ou invalidar o handle
+atual. `SharedState_ConsumesEachSourceHandleOnTransition`,
+`SharedState_RejectsStaleCopiedAndDefaultHandles` e
+`SharedState_PoisonsAllCopiesAfterCapacityFailure` cobrem os caminhos representativos.
+
+**Precondição de ownership:** a região de metadata é exclusiva de um owner. O chamador não
+pode alterá-la, limpá-la ou passá-la a outro construtor enquanto algum handle anterior ainda
+puder ser usado. O construtor inicializa o epoch; reutilizar a região prematuramente pode
+reativar handles antigos e está fora das garantias do spike. A metadata também não pode se
+sobrepor ao destino; o construtor rejeita essa sobreposição. O compilador restringe lifetime,
+mas não garante exclusividade de spans. A API final deve documentar e minimizar esse risco,
+preferindo metadata tipada a inteiros públicos.
+
+```csharp
+Span<int> state = stackalloc int[ProtoSafeWriterOwner.RequiredStateLength];
+var owner = new ProtoSafeWriterOwner(destination, state);
+var order = owner.BeginOrder(clOrdId);
+```
+
+Alternativas honestas:
+
+| Forma | Segurança/lifetime | Trade-off |
+|---|---|---|
+| `Span<State>`/`Span<int>` fornecido pelo chamador (**recomendação do spike**) | Handles stack-only; storage pode ser stack ou heap e precisa permanecer válido e exclusivo. Compila com C# 11/net6. | Novo parâmetro/owner; o spike usa três inteiros, mas a implementação completa pode precisar de mais metadata por escopo. |
+| Owner alocado (`class`) | Cópias compartilham naturalmente status/posição. | Alocação e lifetime de heap; abandona a meta allocation-free do caminho principal. |
+| Typestate por valor sem owner | Bloqueia ordem nominal, mas não cópias divergentes. | **Não aceitável** como contrato seguro de produção. |
+| Tipos lineares/uniqueness futuros | Poderiam impedir cópia em compilação. | Não existem em C# atual; não são base para esta API. |
+
+O protótipo antigo por valor permanece no arquivo apenas para comparar wire order/backpatch; ele
+**não** prova poison-on-failure nem ownership seguro. O emitter futuro só deve integrar o shape
+escopado depois de escolher e aplicar um owner compartilhado equivalente em todas as fases,
+inclusive setters e grupos aninhados. Setters que mantêm a fase devem renovar o epoch do
+handle ativo e invalidar cópias anteriores; transições entregam o novo epoch a outro handle.
+Esses caminhos combinados ainda não estão implementados no spike seguro.
+
+### 12.5 Ordem no wire quando campos obrigatórios e opcionais se intercalam; lifetime de spans de entrada
+
+- **Ordem no wire:** as fases pretendem restringir as transições estruturais; a próxima rajada
+  de campos obrigatórios já vem embutida no `End{Scope}(...)` anterior. Isso não prova toda a
+  ordenação do dicionário. Campos opcionais, especialmente em grupos, não são universalmente
+  permutáveis. O emitter deve respeitar a ordem aplicável com fases adicionais ou checagem de
+  posição/presença, rejeitando duplicatas e reabertura de componente singular. O spike seguro
+  demonstra transferência de ownership, não essas regras completas de ordem e cardinalidade.
+- **Spans de entrada (scratch):** mantém a decisão já tomada e implementada na issue #26 (§2.2) —
+  toda escrita de span (`Wire.WriteSpan` no spike, `FixSpanWriter.WriteField`/`BeginMessage` na
+  implementação real) copia os bytes imediatamente; nenhuma referência ao span de entrada é
+  retida além da chamada. Isso é reprovado explicitamente pelo teste
+  `StackallocInput_CanBeReusedImmediatelyAfterWrite`: o mesmo buffer `stackalloc` é reutilizado
+  para dois campos diferentes de duas mensagens/escopos diferentes, e o primeiro valor
+  permanece correto no destino. **Nenhuma mudança de linguagem/runtime é necessária aqui** — o
+  padrão já funciona em net6+/C# 11+ (mesmo TFM mínimo já documentado em §2.2, sem aumento).
+
+### 12.6 Contagem de grupo: quantidade esperada antecipada vs. backpatch automático
+
+Prototipado em `ProtoPartyGroupWriter` (backpatch) e `ProtoPartyGroupWriterCounted` (antecipada),
+comparados diretamente em `BackpatchGroup_ShiftsBytesWhenDigitWidthGrows` e
+`UpfrontCountVariant_*`:
+
+| | **Backpatch** (`Begin{Group}()`, sem contagem) | **Contagem antecipada** (`Begin{Group}(int expectedCount)`) |
+|---|---|---|
+| Quando o `NUMINGROUP` é conhecido pelo chamador | Não precisa ser conhecido antes de escrever entradas. | Precisa ser conhecido *antes* da primeira entrada. |
+| Custo de `EndGroup()`/escrita do contador | **Não é O(1).** Reserva-se uma largura de placeholder (o spike usa 1 dígito, análogo ao placeholder de 6 dígitos que `FixSpanWriter.Finish()` já reserva para `BodyLength`); se a contagem real precisar de mais dígitos, todos os bytes escritos desde o placeholder até a posição atual precisam ser deslocados (`memmove`) antes dos dígitos finais serem gravados — `BackpatchGroup_ShiftsBytesWhenDigitWidthGrows` força esse caminho com 11 entradas contra um placeholder de 1 dígito. | **O(1)** — os dígitos finais são gravados uma única vez, na posição definitiva, sem deslocamento. |
+| Detecção de erro | O contador final corresponde às entradas concluídas; capacidade insuficiente, valores inválidos e violação de cardinalidade explícita ainda podem falhar. `required` sozinho não estabelece mínimo positivo (§12.3). | Também sujeito a capacidade/valores/cardinalidade; falha na (N+1)-ésima `AddEntry` (excesso) ou em `EndGroup()` (falta). O contador já pode estar gravado; descarte o destino inteiro, sem rollback (§2.2/12.4). |
+| Ergonomia para o chamador | Chamador não precisa pré-calcular a contagem (útil quando as entradas vêm de uma fonte que só sabe seu tamanho ao terminar de iterar). | Chamador precisa saber a contagem adiantada (útil quando a fonte já é um array/lista com `.Length`/`.Count` conhecido — motivo mais comum de já se ter a contagem à mão). |
+
+**Recomendação:** oferecer **as duas** variantes lado a lado no writer gerado (mesmo padrão que
+o writer decimal já oferece hoje `Write{Field}(decimal)`/`Write{Field}(long)`/`Write{Field}(long,
+int)` — múltiplas sobrecargas para trade-offs diferentes, §2.2/issue #25) — deixar o chamador
+escolher por chamada, sem forçar uma política única no gerador. **Não presumir que backpatch é
+de graça:** o placeholder de largura fixa é a mesma técnica pragmática já usada para
+`BodyLength`; para grupos, a largura razoável (2 dígitos cobrem até 99, 3 até 999 entradas sem
+deslocamento) deve ser decidida pelo issue de implementação com base nos dicionários reais do
+benchmark (§12.11), não neste documento.
+
+### 12.7 Reader seletivo, presença, acesso repetido/conversão, duplicatas, tags desconhecidas, fronteiras de grupo aninhado, lifetime da view
+
+Prototipado em `ProtoOrderReader`/`ProtoOrderView`/`ProtoPartyGroupReader.Enumerator`
+(`SelectiveProjection_View_*`, `UnknownTag_IsSkipped_WithoutDisturbingKnownFields`):
+
+- **Reutiliza o modelo de projeção do `[FixView]` (§11):** `ProtoOrderView`
+  localiza os N campos pedidos (aqui, 2: `ClOrdID`+`Price`) e para assim que todos foram vistos;
+  se um campo opcional pedido nunca aparecer, o scan simplesmente chega ao fim do buffer (mesma
+  limitação já documentada em §11 — não há como saber antecipadamente "não vai aparecer mais").
+  Nenhuma mudança de shape é proposta aqui além do que #13/#17 já definiram; a única novidade é
+  usar esse mesmo modelo também para as views/leituras *dentro* de escopos aninhados (não só na
+  mensagem inteira).
+- **Presença/campo repetido/conversão:** mesma convenção de §4/§2.1 (flag `_present` +
+  getter/`TryGet`) — sem mudança proposta. Ler o mesmo campo várias vezes (`reader.ClOrdID`
+  chamado duas vezes) sempre retorna o mesmo resultado (o scan já rodou uma vez no construtor;
+  os getters só fatiam o mesmo `(start, length)` gravado) — barato e determinístico, sem
+  reconversão de estado.
+- **Tags duplicadas:** **Atual:** o reader completo continua varrendo e sobrescrevendo offsets,
+  portanto observa a última ocorrência. **Proposto para projeções com early-exit:** primeira
+  ocorrência por escopo vence; depois que todos os campos pedidos foram encontrados, bytes
+  posteriores não são observados. `ProjectionUsesFirstOccurrenceAcrossEarlyExitBoundary`
+  demonstra duplicata antes e depois da fronteira e também explicita a diferença atual para o
+  reader completo. Não se atribui esse comportamento à especificação FIX nem a retransmissão.
+  Consumidores que exigem rejeição de duplicatas precisam de um modo estrito/full-scan separado;
+  early-exit e validação incondicional de duplicatas são semanticamente incompatíveis.
+- **Tags desconhecidas:** já ignoradas pelo `switch`/`default` implícito hoje (§8, FIX003/FIX006
+  cobrem isso no parse do schema, não no reader) — `UnknownTag_IsSkipped_WithoutDisturbingKnownFields`
+  prova isso com bytes manuscritos contendo um tag 999 não mapeado entre dois campos conhecidos.
+  Nenhuma mudança proposta.
+- **Fronteiras de grupo aninhado:** delimitador sozinho é insuficiente. O enumerador usa
+  conjuntamente (1) `NUMINGROUP` declarado, (2) delimitador da entrada e (3) conjunto achatado de
+  tags membro, incluindo counter/delimitador/membros de grupos aninhados — o mesmo mecanismo do
+  `FixGroupEnumerator` real. Para em count zero, após a quantidade declarada, diante de
+  delimitador ausente ou primeira tag não membro do pai. Count maior que bytes disponíveis
+  termina sem fabricar entrada; count menor não absorve a entrada extra. O spike cobre os quatro
+  casos, boundary por tag desconhecida/não membro e um grupo realmente aninhado.
+- **Lifetime da view/entry através da enumeração:** `ref struct` impede heap, boxing, captura por
+  lambda e travessia de `await`; CS8175 prova apenas a proibição de captura. Ele **não** expira em
+  `MoveNext()`, pode conter outros campos `ref struct`, e uma cópia local de
+  `{Group}EntryReader` continua válida enquanto o span subjacente for válido.
+  `EntryCopyRemainsValidAfterEnumeratorAdvances` demonstra esse caso positivo. Se uma futura
+  implementação reutilizar storage mutável de lookup em vez de offsets imutáveis por valor,
+  deverá armazenar epoch compartilhado e validar cada getter; esta proposta não reutiliza tal
+  storage e portanto não cria invalidação por iteração.
+
+### 12.8 Invariantes por construção vs. validação em runtime (resumo)
+
+| Invariante | Mecanismo |
+|---|---|
+| Campo obrigatório de mensagem/componente/entrada presente antes de prosseguir | **Construção** (parâmetro obrigatório do construtor/`Begin{Scope}`/`End{Scope}` — §12.1). |
+| Ordem de escrita respeitando o wire | **Construção + runtime**, conforme as restrições representadas nas fases; duplicatas e opcionais ainda exigem integração (§12.1/§12.5). |
+| Omissão distinta de zero/false/span vazio | Chamar ou não chamar o método determina presença; valores inválidos são rejeitados, não omitidos (§12.2). Reader usa flag `_present`. |
+| Componente opcional com filho(s) obrigatório(s) conhecido(s) estaticamente | **Construção** (parâmetro de `Begin{Component}` — §12.3). |
+| Grupo com cardinalidade mínima ≥1, quando estabelecida pelo dicionário/regra | **Runtime recomendado** inicialmente; typestate `Empty` → `NonEmpty` é alternativa possível (§12.3). |
+| Acesso ao pai durante filho ativo / fechamento repetido / handle copiado ou default | **Runtime compartilhado** (owner + epoch/status fora do wire, §12.4). |
+| Contagem de grupo (upfront) bate com entradas reais | **Runtime** (`EndGroup()`/`AddEntry` da variante contada, §12.6) — dígitos errados podem já estar gravados antes do erro ser detectado. |
+| Lifetime de view/entry | **Compilador** impede escape para heap/`await`; cópia local permanece válida enquanto o span de origem for válido e não expira em `MoveNext()` (§12.7). |
+| Lifetime de spans de entrada (`stackalloc` reutilizável após a chamada) | **Construção** (cópia imediata, sem retenção — §12.5, já implementado desde a issue #26). |
+| Tags duplicadas / desconhecidas no reader | **Runtime:** projeção early-exit usa primeira ocorrência; reader completo atual usa última; desconhecidas são ignoradas. Validação estrita requer full scan (§12.7). |
+
+### 12.9 Dono único de integração para mudanças de runtime compartilhado
+
+Antes de dois agentes independentes implementarem reader e writer em paralelo, **uma única PR/
+issue de integração** deve:
+1. Decidir a forma final dos tipos de fase (typestate) por mensagem/componente/grupo — nomes,
+   convenção de sufixo (o spike usa `{X}Writer`/`{X}WriterHandle`, mas a convenção real cabe ao
+   dono de integração escolher e documentar em §5).
+2. Decidir a largura do placeholder de `NUMINGROUP` para a variante backpatch (§12.6) com base
+   em medição real (§12.11), não em um número arbitrário.
+3. Decidir se a variante de contagem antecipada é obrigatória, opcional, ou a única oferecida —
+   ambas funcionam (§12.6 prova as duas), mas manter as duas dobra a superfície de código gerado
+   por grupo.
+4. Integrar **uma única implementação de owner compartilhado** (status/epoch/posição e poison)
+   em `RuntimeGenerator.cs`, incluindo handles default/copiados, antes de qualquer emitter
+   escopado ser considerado seguro. Reader e writer não devem criar versões divergentes desse
+   estado compartilhado.
+5. Só depois disso, `WriterEmitter.cs` e `ReaderEmitter.cs` podem ser reescritos por agentes
+   separados sem risco de convergirem em shapes incompatíveis (esta é exatamente a
+   responsabilidade que o próprio issue #29 lista como não pertencendo ao seu escopo).
+
+### 12.10 Exemplos de migração (achatado → escopado)
+
+```csharp
+// Atual (WriterEmitter.cs, achatado, §2.2/§6):
+var w = new NewOrderSingleWriter(destination);
+w.WriteClOrdID("ORD-1"u8);
+w.WriteSymbol("EUR/USD"u8);          // Instrument.Symbol, achatado direto no writer da mensagem
+w.WriteSide('1');
+w.WriteOrderQty(100_000m);
+w.WriteOrdType('1');
+w.WritePrice(1.2345m);
+w.WriteNoPartyIDs(2);                 // contador manual — chamador calcula e nunca é validado
+// ... WriteField(int tag, ...) dinâmico para cada entrada do grupo, sem sub-escopo dedicado ...
+int length = w.Finish();
+```
+
+```csharp
+// Proposto (§12.1-§12.6, ilustrativo — nomes exatos ficam para o dono de integração, §12.9):
+Span<int> state = stackalloc int[ScopedWriterOwner.RequiredStateLength];
+var owner = new ScopedWriterOwner(destination, state);
+var writer = owner.BeginNewOrderSingle("ORD-1"u8);
+var instrument = writer.BeginInstrument("EUR/USD"u8);
+var tail = instrument.EndInstrument(side: '1', orderQty: 100_000m, ordType: '1');
+tail.WritePrice(1.2345m);
+tail = tail.BeginOptionalBroker("BROKER"u8) // componente omitido se Begin não for chamado;
+           .EndOptionalBroker();            // se presente, Broker é obrigatório/não vazio
+var group = tail.BeginNoPartyIDs();   // ou tail.BeginNoPartyIDs(expectedCount: 2), ver §12.6
+group.AddEntry("PARTY-A"u8, partyIdSource: 'D', partyRole: 3);
+var entry = group.BeginEntry("PARTY-B"u8);
+var nested = entry.BeginNoNestedPartyIDs();
+nested.AddEntry("SUB-1"u8, role: 1);
+entry = nested.EndGroup();
+group = entry.EndEntry();
+int length = group.EndGroup().Finish();
+```
+
+O exemplo combinado acima **não é executável ainda**. Os spikes separados estão em
+`tests/FixSourceGenerator.Tests/ScopedApiContractExamples.cs` +
+`ScopedApiContractExamplesTests.cs` (`dotnet test --filter
+FullyQualifiedName~ScopedApiContractExamplesTests`). O protótipo por valor demonstra
+wire order/contadores/round-trip de corpos; `ProtoSafeWriterOwner` demonstra ownership num
+subconjunto sem setters opcionais nem grupos. O grupo aninhado do spike é uma operação
+limitada, não a cadeia de handles `BeginEntry`/`EndEntry` ilustrada acima.
+
+### 12.11 Cenários de benchmark para decidir entre as formas viáveis
+
+Nenhum destes foi executado como parte deste issue (medição de performance é responsabilidade do
+integrador, não deste design) — ficam registrados aqui para orientar quem for medir:
+
+1. **Achatado (atual) vs. escopado (proposto), mesma mensagem:** tempo de encode + bytes de
+   código gerado (IL size) para uma mensagem com 1 componente obrigatório + 1 grupo opcional de
+   N entradas, N ∈ {0, 1, 10, 100}. Medir separadamente owner com metadata stack-only e owner
+   alocado; não presumir custo, inlining, tamanho de código ou ausência de alocação.
+2. **Backpatch vs. contagem antecipada (§12.6), grupos grandes:** medir o custo do `memmove` de
+   `EndGroup()` quando a largura do placeholder é excedida, variando N e a largura reservada
+   (2 vs. 3 dígitos) contra os dicionários reais já usados pelos benchmarks existentes
+   (`FIX44-quickfixn-dictionary.xml`, variando a quantidade real de entradas, não confundindo-a
+   com a quantidade de tags possíveis do schema) — usar `benchmarks/FixSourceGenerator.Benchmarks` como harness, mesmo padrão dos
+   experimentos existentes (`benchmarks/experiments/README.md`).
+3. **`[FixView]`-estilo seletivo vs. reader completo, para leitura dentro de escopos aninhados
+   (§12.7):** já parcialmente coberto pelas benchmarks de grupo existentes
+   (`FixViewBenchmarks.cs`/`MarketDataReaderBenchmarks`) — estender para um cenário de view
+   seletiva dentro de uma entrada de grupo profundamente aninhada, comparando com o reader
+   completo da mesma entrada.
+4. **Owner compartilhado (§12.4):** comparar metadata caller-owned (`Span<int>`/`Span<State>`)
+   com owner alocado e writer achatado, incluindo caminho feliz e falha envenenada. Só considerar
+   hints de inlining depois da medição.
+
+### 12.12 Decisão e trade-offs explícitos
+
+**Recomendação:** adotar o shape escopado/typestate com **owner compartilhado caller-owned**
+(§12.1-§12.7) como direção para a próxima
+geração de writer, mantendo o reader já descrito em §2.1/§11 (eager-locate/lazy-parse + `[FixView]`)
+praticamente inalterado — a mudança de reader proposta aqui é só estender o mesmo modelo para
+escopos aninhados (§12.7), não redesenhá-lo. Trade-offs assumidos conscientemente:
+
+- **Mais tipos gerados por mensagem** (um `ref struct` por fase de escopo obrigatório) em troca de
+  invariantes de ordem/obrigatoriedade checadas em tempo de compilação em vez de só em runtime —
+  aceito, é o mesmo espírito de "erro em tempo de compilação em vez de erro em produção" que já
+  motiva o resto do gerador (§0).
+- **Handle obsoleto/copiado deve falhar**, não corromper silenciosamente (§12.4). A integração do
+  owner compartilhado e poison é condição de entrada para emitters de produção; typestate apenas
+  por valor não é aprovado.
+- **Nenhum aumento de TFM foi demonstrado como necessário.** O mesmo fonte do spike é compilado
+  pelo projeto de compatibilidade real `net6.0`/C# 11 via `Compile Link`; os testes comportamentais
+  rodam em `net9.0`. Isso prova o floor de compilação, não uma execução em runtime net6. O requisito
+  mais novo de `[FixView]` vem de **partial properties** (C# 13), não de `partial ref struct`.
+- **Duas políticas de contagem de grupo (§12.6) coexistindo** aumenta a superfície de API por
+  grupo — aceito como proposta inicial; o dono de integração (§12.9) pode decidir reduzir para
+  uma só, com base nos benchmarks de §12.11.
