@@ -513,6 +513,11 @@ for every entry, while W accesses it once at message level. These counts are dis
 
 ### Isolated temporal ASCII fast-path experiment
 
+**Implementation status:** #30 promotes this temporal fast path into the generated runtime.
+The investigation below describes the original isolated experiment against prework baseline
+`a0b1aab`, not a claim that the current runtime still uses only the original parser. Its
+historical timings are not new measurements of the integrated change.
+
 An isolated source copy adds a checked ASCII fast path to the existing temporal runtime parsers:
 `yyyyMMdd`, `HH:mm:ss[.fff]`, and `yyyyMMdd-HH:mm:ss[.fff]`. It checks digits, separators, calendar
 day validity and time ranges before constructing the value; timestamps retain UTC Kind.
@@ -575,3 +580,45 @@ Two separate opportunities emerge: a common-format temporal fast path that can r
 existing reader API, and scoped selective entry/component readers that avoid locating many
 unused fields. The latter has a narrower prototype contract and requires more design work to
 generalize; neither experiment changes the production runtime in this investigation.
+
+### Integrated temporal implementation (#30)
+
+The 51 permanent temporal-reader cases also ran on .NET 6.0.36, 8.0.26, 9.0.14 and
+10.0.11, comparing generated parsing with each executing framework's parser. This includes
+failure defaults, UTC Kind and common-path allocation assertions; it is not exhaustive
+coverage of every input or runtime release.
+
+The opt-in test-project mode excludes QuickFIX/n interoperability dependencies (which require
+.NET 8+) and links only the existing temporal cases and generation helpers. Its binaries and
+intermediates are isolated from the normal suite; without the property, the original .NET 9
+test project is unchanged. Install the corresponding runtimes and run:
+
+```bash
+for framework in net6.0 net8.0 net9.0 net10.0; do
+  dotnet test tests/FixSourceGenerator.Tests/FixSourceGenerator.Tests.csproj \
+    -c Release -p:TemporalRuntimeTargetFramework="$framework" \
+    --filter FullyQualifiedName~TemporalReaderTests
+done
+```
+
+CI runs the same matrix, including for the stacked prework PR. The local .NET 6 run used
+an isolated runtime with `-- RunConfiguration.DotNetHostPath=/path/to/net6/dotnet`;
+compiling the net6/C#11 compatibility consumer remains a separate check.
+
+The interleaved load was rerun against the actual implementation commit `b97be92` and prework
+baseline `a0b1aab`, with other local agents no longer building. Same .NET 10 host and paired-load
+protocol: one thread, eight alternating 250 ms blocks per implementation/case after warmup.
+Medians in microseconds per 50-entry frame:
+
+| Path | X baseline | X integrated | W baseline | W integrated |
+|---|---:|---:|---:|---:|
+| Generated | 85.77 | 56.18 | 69.14 | 41.19 |
+| Generated, no temporal parsing | 48.85 | 47.84 | 32.85 | 32.85 |
+| Group-scoped projection | 68.05 | 37.19 | 67.69 | 34.96 |
+| Located temporal values | 34.03 | 4.92 | 33.85 | 4.82 |
+
+Both variants recorded zero allocated bytes on the measured thread. Full-decoding block
+ranges were 83.64-92.73 us versus 51.70-57.62 us for X and 68.44-71.20 us versus
+39.34-43.84 us for W. The no-temporal controls remained close. This supports the integrated
+parser improvement, but remains a shared-host paired load, not a new BenchmarkDotNet run
+or a production latency guarantee. Group-scoped projection remains a narrower prototype.

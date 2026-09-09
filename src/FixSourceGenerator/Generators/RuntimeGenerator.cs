@@ -211,6 +211,14 @@ namespace __NS__.Runtime
 
         public static bool TryParseDateTime(ReadOnlySpan<byte> value, out DateTime result)
         {
+            if ((value.Length == 17 || value.Length == 21) && value[8] == (byte)'-'
+                && TryReadDateParts(value.Slice(0, 8), out int year, out int month, out int day)
+                && TryReadTimeParts(value.Slice(9), out int hour, out int minute, out int second, out int millisecond))
+            {
+                result = new DateTime(year, month, day, hour, minute, second, millisecond, DateTimeKind.Utc);
+                return true;
+            }
+
             if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
@@ -240,6 +248,12 @@ namespace __NS__.Runtime
 
         public static bool TryParseDateOnly(ReadOnlySpan<byte> value, out DateOnly result)
         {
+            if (TryReadDateParts(value, out int year, out int month, out int day))
+            {
+                result = new DateOnly(year, month, day);
+                return true;
+            }
+
             if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
@@ -264,6 +278,12 @@ namespace __NS__.Runtime
 
         public static bool TryParseTimeOnly(ReadOnlySpan<byte> value, out TimeOnly result)
         {
+            if (TryReadTimeParts(value, out int hour, out int minute, out int second, out int millisecond))
+            {
+                result = new TimeOnly(hour, minute, second, millisecond);
+                return true;
+            }
+
             if (value.Length > 0)
             {
                 Span<char> chars = stackalloc char[value.Length];
@@ -284,6 +304,48 @@ namespace __NS__.Runtime
             bool ok = TryParseTimeOnly(value, out TimeOnly result);
             Debug.Assert(ok, ""required time field is absent or malformed"");
             return result;
+        }
+
+        private static bool TryReadDateParts(ReadOnlySpan<byte> value, out int year, out int month, out int day)
+        {
+            year = month = day = 0;
+            return value.Length == 8
+                && TryReadDigits(value, 0, 4, out year)
+                && TryReadDigits(value, 4, 2, out month)
+                && TryReadDigits(value, 6, 2, out day)
+                && year >= 1 && month >= 1 && month <= 12
+                && day >= 1 && day <= DateTime.DaysInMonth(year, month);
+        }
+
+        private static bool TryReadTimeParts(ReadOnlySpan<byte> value, out int hour, out int minute,
+            out int second, out int millisecond)
+        {
+            hour = minute = second = millisecond = 0;
+            return (value.Length == 8 || value.Length == 12)
+                && value[2] == (byte)':' && value[5] == (byte)':'
+                && TryReadDigits(value, 0, 2, out hour)
+                && TryReadDigits(value, 3, 2, out minute)
+                && TryReadDigits(value, 6, 2, out second)
+                && hour <= 23 && minute <= 59 && second <= 59
+                && (value.Length == 8 || (value[8] == (byte)'.'
+                    && TryReadDigits(value, 9, 3, out millisecond)));
+        }
+
+        private static bool TryReadDigits(ReadOnlySpan<byte> value, int start, int length, out int result)
+        {
+            result = 0;
+            for (int i = start; i < start + length; i++)
+            {
+                uint digit = (uint)(value[i] - (byte)'0');
+                if (digit > 9)
+                {
+                    return false;
+                }
+
+                result = result * 10 + (int)digit;
+            }
+
+            return true;
         }
 
         // --- Buffer+tag lookup helpers (single-field scan-from-zero) -----------------------
