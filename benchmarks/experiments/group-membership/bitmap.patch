@@ -1,0 +1,107 @@
+--- a/src/FixSourceGenerator/Generators/ReaderEmitter.cs
++++ b/src/FixSourceGenerator/Generators/ReaderEmitter.cs
+@@ -370,12 +370,19 @@
+             int delimiterTag = FixEntryHelpers.GetDelimiterTag(groupRef.Entries);
+             var entryTags = new List<int>(FixEntryHelpers.FlattenEntryTags(groupRef.Entries));
+             entryTags.Sort();
++            var bitmap = new ulong[entryTags.Count == 0 ? 0 : (entryTags[entryTags.Count - 1] >> 6) + 1];
++            foreach (int tag in entryTags)
++                bitmap[tag >> 6] |= 1UL << (tag & 63);
++            var bitmapValues = new List<string>();
++            foreach (ulong block in bitmap)
++                bitmapValues.Add("0x" + block.ToString("X16", global::System.Globalization.CultureInfo.InvariantCulture) + "UL");
+             string r = $"{_runtimeNs}.FixSpanReader";
+ 
+             w.Open($"public readonly ref struct {groupReaderType}");
+             w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
+             w.Line();
+             w.Line($"private static readonly int[] EntryTags = new int[] {{ {Join(entryTags)} }};");
++            w.Line($"private static readonly ulong[] EntryTagBits = new ulong[] {{ {string.Join(", ", bitmapValues)} }};");
+             w.Line();
+             w.Line($"public {groupReaderType}(global::System.ReadOnlySpan<byte> buffer) => _buffer = buffer;");
+             w.Line();
+@@ -387,7 +394,7 @@
+             w.Open("public ref struct Enumerator");
+             w.Line($"private {_runtimeNs}.FixGroupEnumerator _inner;");
+             w.Line();
+-            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags, sortedEntryTags: true);");
++            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags, EntryTagBits);");
+             w.Line();
+             w.Line($"public {entryReaderType} Current => new {entryReaderType}(_inner.Current);");
+             w.Line();
+--- a/src/FixSourceGenerator/Generators/RuntimeGenerator.cs
++++ b/src/FixSourceGenerator/Generators/RuntimeGenerator.cs
+@@ -343,22 +343,30 @@
+         private readonly ReadOnlySpan<byte> _buffer;
+         private readonly ReadOnlySpan<int> _entryTags;
+         private readonly int _delimiterTag;
++        private readonly ReadOnlySpan<ulong> _entryTagBits;
+         private readonly bool _binarySearch;
+         private int _position;
+         private int _remaining;
+         private ReadOnlySpan<byte> _current;
+ 
+         public FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags)
+-            : this(buffer, counterTag, delimiterTag, entryTags, sortedEntryTags: false)
++            : this(buffer, counterTag, delimiterTag, entryTags, default(ReadOnlySpan<ulong>))
+         {
+         }
+ 
+         internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags)
++            : this(buffer, counterTag, delimiterTag, entryTags, default(ReadOnlySpan<ulong>))
++        {
++            _binarySearch = sortedEntryTags && entryTags.Length > 16;
++        }
++
++        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, ReadOnlySpan<ulong> entryTagBits)
+         {
+             _buffer = buffer;
+             _entryTags = entryTags;
+             _delimiterTag = delimiterTag;
+-            _binarySearch = sortedEntryTags && entryTags.Length > 16;
++            _entryTagBits = entryTags.Length > 16 ? entryTagBits : default;
++            _binarySearch = false;
+             _current = default;
+             _remaining = 0;
+             _position = buffer.Length;
+@@ -413,29 +421,24 @@
+         private readonly bool Contains(int tag)
+         {
+             var tags = _entryTags;
++            if (!_entryTagBits.IsEmpty)
++            {
++                int bucket = tag >> 6;
++                return (uint)bucket < (uint)_entryTagBits.Length
++                    && (_entryTagBits[bucket] & (1UL << (tag & 63))) != 0;
++            }
++
+             if (_binarySearch)
+             {
+-                int low = 0;
+-                int high = tags.Length - 1;
++                int low = 0, high = tags.Length - 1;
+                 while (low <= high)
+                 {
+                     int middle = low + ((high - low) >> 1);
+                     int candidate = tags[middle];
+-                    if (candidate == tag)
+-                    {
+-                        return true;
+-                    }
+-
+-                    if (candidate < tag)
+-                    {
+-                        low = middle + 1;
+-                    }
+-                    else
+-                    {
+-                        high = middle - 1;
+-                    }
++                    if (candidate == tag) return true;
++                    if (candidate < tag) low = middle + 1;
++                    else high = middle - 1;
+                 }
+-
+                 return false;
+             }
+ 
