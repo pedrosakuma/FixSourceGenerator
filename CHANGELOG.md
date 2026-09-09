@@ -6,6 +6,30 @@ versions until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+- Writer capacity failures now throw `ArgumentException` (`destination`) consistently across
+  envelope fields, values, group counters, and finalization. A failed writer rejects further
+  operations with `InvalidOperationException`, preventing malformed success-shaped frames (#23).
+
+### Added
+- `scoped` byte-span inputs on generated setters and runtime writer APIs, allowing local
+  `stackalloc` identifiers through by-reference helpers and repeating-group fields without
+  retaining scratch memory. Consumers remain .NET 6+ with C# 11+ (#26).
+- Integral `long` and scaled-integer `(long mantissa, int scale)` setters for decimal FIX
+  fields. Scales 0..18 preserve trailing zeros and handle `long.MinValue`; decimal setters
+  and reader types remain unchanged (#25).
+- Isolated numeric/temporal and full-dictionary generated X/W writer benchmarks with
+  10/50 repeating-group entries.
+
+### Changed
+- Temporal writers now format fixed-position ASCII directly, preserving existing precision,
+  invariant formatting, and supplied DateTime clock fields without implicit timezone conversion (#27).
+- Generated setters copy compile-time ASCII tag prefixes through shared runtime value formatters.
+  Dynamic integer-tag runtime APIs and envelope backpatching are unchanged (#24).
+- Generated repeating groups sort their membership tags at generation time and use binary search
+  for sets larger than 16 tags. Small sets retain linear lookup, and the public runtime enumerator
+  still accepts unsorted tags. Wire-order delimiters and nested-group boundaries are unchanged.
+
 ## [0.1.0] - 2026-08-27
 
 ### Added

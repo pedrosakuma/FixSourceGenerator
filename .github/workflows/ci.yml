@@ -35,3 +35,9 @@ jobs:
         run: dotnet build FixSourceGenerator.sln --no-restore -c Release
       - name: Test
         run: dotnet test FixSourceGenerator.sln --no-build -c Release
+      - name: Check investigation fixtures and local runner
+        run: |
+          bash -n scripts/agents/local.sh
+          scripts/agents/local.sh --help
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-order-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-process-check

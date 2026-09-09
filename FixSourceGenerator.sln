@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmarks", "benchmarks", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FixSourceGenerator.Benchmarks", "benchmarks\FixSourceGenerator.Benchmarks\FixSourceGenerator.Benchmarks.csproj", "{B98683FD-B30C-4FE7-B40D-45883204883F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FixSourceGenerator.Compatibility", "tests\FixSourceGenerator.Compatibility\FixSourceGenerator.Compatibility.csproj", "{F967671B-4873-4646-892A-1D265FDC6540}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -61,6 +63,18 @@ Global
 		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x64.Build.0 = Release|Any CPU
 		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x86.ActiveCfg = Release|Any CPU
 		{B98683FD-B30C-4FE7-B40D-45883204883F}.Release|x86.Build.0 = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|x64.Build.0 = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Debug|x86.Build.0 = Debug|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|x64.ActiveCfg = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|x64.Build.0 = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|x86.ActiveCfg = Release|Any CPU
+		{F967671B-4873-4646-892A-1D265FDC6540}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -69,5 +83,6 @@ Global
 		{B18869DA-FC5E-4970-9292-61A32B89623A} = {6B4A1AE5-5BC7-4B9B-9F44-0EC8613D955A}
 		{FA86CBBC-2212-458C-9B64-70751822D32D} = {A7BA61C3-81D6-4D58-9070-8922966B5AC4}
 		{B98683FD-B30C-4FE7-B40D-45883204883F} = {66320409-64EC-F7C5-3DEF-65E7510DAAD1}
+		{F967671B-4873-4646-892A-1D265FDC6540} = {A7BA61C3-81D6-4D58-9070-8922966B5AC4}
 	EndGlobalSection
 EndGlobal

@@ -175,6 +175,45 @@ Para cada mensagem, o generator emite um `{Message}Writer` (`ref struct` sobre
 - Grupos: `WriteNoAllocsGroup(int count, Action<...> writeEntry)` ou um builder
   aninhado, sempre escrevendo direto no `Span<byte>` de destino.
 
+**Contrato de capacidade (issue #23):** construtor, setters e `Finish()` falham com
+`ArgumentException` (`ParamName == "destination"`) quando falta espaço no destino, inclusive
+para separadores, contadores e checksum. A falha invalida a instância: qualquer escrita,
+`BeginMessage()` ou `Finish()` posterior lança `InvalidOperationException`. O buffer parcial
+não deve ser enviado; é necessário construir outro writer. Não há rollback de campos
+parcialmente escritos. `Finish()` verifica o espaço para o deslocamento do BodyLength e os
+sete bytes do checksum antes de alterar o frame. O destino deve comportar também o estado
+intermediário com placeholder de seis dígitos, mesmo quando o frame final usa menos dígitos.
+O chamador continua responsável pelo buffer, sem aluguel/crescimento automático e sem
+alocações gerenciadas no caminho de sucesso.
+
+**Lifetime de entradas (issue #26):** setters de bytes e `FixSpanWriter.WriteField` /
+`BeginMessage` recebem `scoped ReadOnlySpan<byte>` e copiam os bytes imediatamente.
+Entradas `stackalloc` podem ser reutilizadas após a chamada, inclusive em helpers com
+writer por referência e em campos de grupos. O destino continua retido, sem `scoped`;
+readers mantêm os spans que referenciam a entrada. O consumidor usa **net6+ e C# 11+**,
+versão de linguagem já necessária para os literais `u8`; não há aumento de TFM.
+
+**Números (issue #25):** campos da categoria `decimal` mantêm o setter original e ganham
+`Write{Field}(long value)` e `Write{Field}(long mantissa, int scale)`. A escala aceita
+0..18, preservando zeros finais, sinal e os limites de `long`. Escala inválida lança
+`ArgumentOutOfRangeException` (`scale`) e invalida o writer antes de escrever o campo.
+Os readers permanecem `decimal`; campos `INT`/contadores e identificadores `STRING` não
+mudam de tipo. O formatter é compartilhado no runtime, sem string temporária.
+
+**Datas e horas (issue #27):** writers emitem ASCII diretamente, mantendo
+`yyyyMMdd-HH:mm:ss.fff`, `yyyyMMdd` e `HH:mm:ss.fff`. Frações abaixo de milissegundos
+são truncadas. Como no writer original, `DateTime.Kind` não provoca conversão:
+escrevem-se os componentes fornecidos; cabe ao chamador fornecer UTC quando exigido pelo
+campo FIX. A interpretação UTC dos readers permanece inalterada. Não há nova precisão,
+offset, arredondamento ou alocação gerenciada no caminho de sucesso.
+
+**Prefixos (issue #24):** setters gerados usam literais ASCII constantes (`"270="u8`),
+copiados por uma primitiva compartilhada; os formatters de valores são os mesmos da API
+dinâmica `WriteField(int tag, ...)`, que permanece disponível. Campos comuns, componentes,
+header/trailer e grupos seguem a mesma regra, sem tags específicas de um mercado.
+O envelope automático e o algoritmo de backpatch não mudam. A decisão e o custo adicional
+de código estão registrados no README dos benchmarks.
+
 ### 3.3 O que isso implica (trade-offs assumidos conscientemente)
 
 - **Não há DTO alocado por padrão.** Quem quiser um objeto materializado (para guardar

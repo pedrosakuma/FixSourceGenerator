@@ -368,7 +368,8 @@ namespace FixSourceGenerator.Generators
             string entryReaderType = groupId + "EntryReader";
             int counterTag = groupRef.CounterField.Number;
             int delimiterTag = FixEntryHelpers.GetDelimiterTag(groupRef.Entries);
-            var entryTags = FixEntryHelpers.FlattenEntryTags(groupRef.Entries);
+            var entryTags = new List<int>(FixEntryHelpers.FlattenEntryTags(groupRef.Entries));
+            entryTags.Sort();
             string r = $"{_runtimeNs}.FixSpanReader";
 
             w.Open($"public readonly ref struct {groupReaderType}");
@@ -386,7 +387,7 @@ namespace FixSourceGenerator.Generators
             w.Open("public ref struct Enumerator");
             w.Line($"private {_runtimeNs}.FixGroupEnumerator _inner;");
             w.Line();
-            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags);");
+            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags, sortedEntryTags: true);");
             w.Line();
             w.Line($"public {entryReaderType} Current => new {entryReaderType}(_inner.Current);");
             w.Line();

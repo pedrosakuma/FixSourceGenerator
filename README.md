@@ -78,6 +78,8 @@ nested groups) and guidance on versioning schemas over time.
   - `Generators/` — codegen for readers, writers, enums, components, and the embedded runtime.
   - `Diff/` — `SchemaDiffer`, for comparing two dictionary versions and flagging breaking changes.
 - `tests/FixSourceGenerator.Tests` — unit, generator-driver, and real-schema conformance tests.
+- `tests/FixSourceGenerator.Compatibility` — build-only .NET 6 / C# 11 consumer, including
+  stack-based writer inputs; built by the solution's CI build.
 - `benchmarks/FixSourceGenerator.Benchmarks` — BenchmarkDotNet CPU/allocation benchmarks for the
   generated reader/writer (see the benchmarks project's own README for how to run them and the
   latest recorded numbers).
@@ -88,4 +90,3 @@ nested groups) and guidance on versioning schemas over time.
 ## License
 
 MIT — see [`LICENSE.txt`](LICENSE.txt).
-

@@ -343,15 +343,22 @@ namespace __NS__.Runtime
         private readonly ReadOnlySpan<byte> _buffer;
         private readonly ReadOnlySpan<int> _entryTags;
         private readonly int _delimiterTag;
+        private readonly bool _binarySearch;
         private int _position;
         private int _remaining;
         private ReadOnlySpan<byte> _current;
 
         public FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags)
+            : this(buffer, counterTag, delimiterTag, entryTags, sortedEntryTags: false)
+        {
+        }
+
+        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags)
         {
             _buffer = buffer;
             _entryTags = entryTags;
             _delimiterTag = delimiterTag;
+            _binarySearch = sortedEntryTags && entryTags.Length > 16;
             _current = default;
             _remaining = 0;
             _position = buffer.Length;
@@ -389,7 +396,7 @@ namespace __NS__.Runtime
             int cursor = afterDelimiter;
             while (FixSpanReader.TryReadField(_buffer, cursor, out int nextTag, out _, out _, out int next))
             {
-                if (nextTag == _delimiterTag || !Contains(_entryTags, nextTag))
+                if (nextTag == _delimiterTag || !Contains(nextTag))
                 {
                     break;
                 }
@@ -403,8 +410,35 @@ namespace __NS__.Runtime
             return true;
         }
 
-        private static bool Contains(ReadOnlySpan<int> tags, int tag)
+        private readonly bool Contains(int tag)
         {
+            var tags = _entryTags;
+            if (_binarySearch)
+            {
+                int low = 0;
+                int high = tags.Length - 1;
+                while (low <= high)
+                {
+                    int middle = low + ((high - low) >> 1);
+                    int candidate = tags[middle];
+                    if (candidate == tag)
+                    {
+                        return true;
+                    }
+
+                    if (candidate < tag)
+                    {
+                        low = middle + 1;
+                    }
+                    else
+                    {
+                        high = middle - 1;
+                    }
+                }
+
+                return false;
+            }
+
             for (int i = 0; i < tags.Length; i++)
             {
                 if (tags[i] == tag)
@@ -480,6 +514,11 @@ namespace __NS__.Runtime
     /// placeholder that is back-patched, and computing the CheckSum (tag 10) via a running byte sum
     /// on Finish (docs/CONTRACT.md §2.2).
     /// </summary>
+    /// <remarks>
+    /// Insufficient destination capacity throws ArgumentException and invalidates this instance.
+    /// Subsequent writes and Finish throw InvalidOperationException. Partial bytes must be discarded.
+    /// Input spans are copied synchronously; only the destination span is retained.
+    /// </remarks>
     public ref struct FixSpanWriter
     {
         private const byte Soh = 0x01;
@@ -489,6 +528,7 @@ namespace __NS__.Runtime
         private int _position;
         private int _bodyLengthPos;
         private int _bodyStart;
+        private bool _failed;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public FixSpanWriter(Span<byte> buffer)
@@ -497,6 +537,7 @@ namespace __NS__.Runtime
             _position = 0;
             _bodyLengthPos = 0;
             _bodyStart = 0;
+            _failed = false;
         }
 
         public readonly int Position => _position;
@@ -505,11 +546,12 @@ namespace __NS__.Runtime
         /// Writes <c>8=beginString&lt;SOH&gt;</c>, a reserved <c>9=</c> BodyLength placeholder and
         /// <c>35=msgType&lt;SOH&gt;</c>.
         /// </summary>
-        public void BeginMessage(ReadOnlySpan<byte> beginString, ReadOnlySpan<byte> msgType)
+        public void BeginMessage(scoped ReadOnlySpan<byte> beginString, scoped ReadOnlySpan<byte> msgType)
         {
             WriteField(8, beginString);
 
             WriteTagPrefix(9);
+            EnsureCapacity(BodyLengthPlaceholderWidth + 1);
             _bodyLengthPos = _position;
             for (int i = 0; i < BodyLengthPlaceholderWidth; i++)
             {
@@ -522,9 +564,25 @@ namespace __NS__.Runtime
             WriteField(35, msgType);
         }
 
-        public void WriteField(int tag, ReadOnlySpan<byte> value)
+        public void WriteField(int tag, scoped ReadOnlySpan<byte> value)
         {
             WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, scoped ReadOnlySpan<byte> value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(scoped ReadOnlySpan<byte> value)
+        {
+            // Compare before adding SOH space so even an int.MaxValue-length input cannot overflow.
+            if (value.Length >= _buffer.Length - _position)
+            {
+                ThrowCapacityExceeded();
+            }
             value.CopyTo(_buffer.Slice(_position));
             _position += value.Length;
             _buffer[_position++] = Soh;
@@ -533,15 +591,135 @@ namespace __NS__.Runtime
         public void WriteField(int tag, int value)
         {
             WriteTagPrefix(tag);
-            Utf8Formatter.TryFormat(value, _buffer.Slice(_position), out int written);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, int value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(int value)
+        {
+            if (!Utf8Formatter.TryFormat(value, _buffer.Slice(_position), out int written))
+            {
+                ThrowCapacityExceeded();
+            }
+            EnsureCapacity(written + 1);
             _position += written;
+            _buffer[_position++] = Soh;
+        }
+
+        public void WriteField(int tag, long value)
+        {
+            WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, long value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(long value)
+        {
+            if (!Utf8Formatter.TryFormat(value, _buffer.Slice(_position), out int written))
+            {
+                ThrowCapacityExceeded();
+            }
+            EnsureCapacity(written + 1);
+            _position += written;
+            _buffer[_position++] = Soh;
+        }
+
+        /// <summary>Writes mantissa * 10^-scale, preserving exactly scale fractional digits (0..18).</summary>
+        public void WriteField(int tag, long mantissa, int scale)
+        {
+            ValidateScale(scale);
+            WriteTagPrefix(tag);
+            WriteValue(mantissa, scale);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, long mantissa, int scale)
+        {
+            ValidateScale(scale);
+            WriteTagPrefix(prefix);
+            WriteValue(mantissa, scale);
+        }
+
+        private void ValidateScale(int scale)
+        {
+            ThrowIfFailed();
+            if (scale < 0 || scale > 18)
+            {
+                _failed = true;
+                throw new ArgumentOutOfRangeException(nameof(scale), ""Scale must be between 0 and 18."");
+            }
+        }
+
+        private void WriteValue(long mantissa, int scale)
+        {
+            Span<byte> digits = stackalloc byte[20];
+            if (!Utf8Formatter.TryFormat(mantissa, digits, out int written))
+            {
+                _failed = true;
+                throw new InvalidOperationException(""Mantissa could not be formatted."");
+            }
+
+            int signLength = mantissa < 0 ? 1 : 0;
+            int digitCount = written - signLength;
+            int integerDigits = digitCount - scale;
+            int valueLength = signLength + Math.Max(1, integerDigits) + (scale == 0 ? 0 : scale + 1);
+            EnsureCapacity(valueLength + 1);
+
+            if (signLength != 0)
+            {
+                _buffer[_position++] = (byte)'-';
+            }
+            if (integerDigits > 0)
+            {
+                digits.Slice(signLength, integerDigits).CopyTo(_buffer.Slice(_position));
+                _position += integerDigits;
+            }
+            else
+            {
+                _buffer[_position++] = (byte)'0';
+            }
+            if (scale != 0)
+            {
+                _buffer[_position++] = (byte)'.';
+                int zeroCount = Math.Max(0, -integerDigits);
+                _buffer.Slice(_position, zeroCount).Fill((byte)'0');
+                _position += zeroCount;
+                int fractionStart = signLength + Math.Max(0, integerDigits);
+                int fractionLength = written - fractionStart;
+                digits.Slice(fractionStart, fractionLength).CopyTo(_buffer.Slice(_position));
+                _position += fractionLength;
+            }
             _buffer[_position++] = Soh;
         }
 
         public void WriteField(int tag, decimal value)
         {
             WriteTagPrefix(tag);
-            Utf8Formatter.TryFormat(value, _buffer.Slice(_position), out int written);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, decimal value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(decimal value)
+        {
+            if (!Utf8Formatter.TryFormat(value, _buffer.Slice(_position), out int written))
+            {
+                ThrowCapacityExceeded();
+            }
+            EnsureCapacity(written + 1);
             _position += written;
             _buffer[_position++] = Soh;
         }
@@ -549,6 +727,18 @@ namespace __NS__.Runtime
         public void WriteField(int tag, bool value)
         {
             WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, bool value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(bool value)
+        {
+            EnsureCapacity(2);
             _buffer[_position++] = (byte)(value ? 'Y' : 'N');
             _buffer[_position++] = Soh;
         }
@@ -556,27 +746,107 @@ namespace __NS__.Runtime
         public void WriteField(int tag, char value)
         {
             WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, char value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(char value)
+        {
+            EnsureCapacity(2);
             _buffer[_position++] = (byte)value;
             _buffer[_position++] = Soh;
         }
 
-        public void WriteField(int tag, DateTime value) => WriteFormatted(tag, value, ""yyyyMMdd-HH:mm:ss.fff"");
-
-        public void WriteField(int tag, DateOnly value) => WriteFormatted(tag, value, ""yyyyMMdd"");
-
-        public void WriteField(int tag, TimeOnly value) => WriteFormatted(tag, value, ""HH:mm:ss.fff"");
-
-        private void WriteFormatted<T>(int tag, T value, string format) where T : ISpanFormattable
+        public void WriteField(int tag, DateTime value)
         {
             WriteTagPrefix(tag);
-            Span<char> chars = stackalloc char[32];
-            value.TryFormat(chars, out int written, format, CultureInfo.InvariantCulture);
-            for (int i = 0; i < written; i++)
-            {
-                _buffer[_position++] = (byte)chars[i];
-            }
+            WriteValue(value);
+        }
 
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, DateTime value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(DateTime value)
+        {
+            EnsureCapacity(22);
+            // Preserve the supplied clock fields for every Kind, without implicit UTC conversion.
+            WriteDate(value.Year, value.Month, value.Day);
+            _buffer[_position++] = (byte)'-';
+            WriteTime(value.Hour, value.Minute, value.Second, value.Millisecond);
             _buffer[_position++] = Soh;
+        }
+
+        public void WriteField(int tag, DateOnly value)
+        {
+            WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, DateOnly value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(DateOnly value)
+        {
+            EnsureCapacity(9);
+            WriteDate(value.Year, value.Month, value.Day);
+            _buffer[_position++] = Soh;
+        }
+
+        public void WriteField(int tag, TimeOnly value)
+        {
+            WriteTagPrefix(tag);
+            WriteValue(value);
+        }
+
+        internal void WriteField(scoped ReadOnlySpan<byte> prefix, TimeOnly value)
+        {
+            WriteTagPrefix(prefix);
+            WriteValue(value);
+        }
+
+        private void WriteValue(TimeOnly value)
+        {
+            EnsureCapacity(13);
+            WriteTime(value.Hour, value.Minute, value.Second, value.Millisecond);
+            _buffer[_position++] = Soh;
+        }
+
+        private void WriteDate(int year, int month, int day)
+        {
+            WriteTwoDigits(year / 100);
+            WriteTwoDigits(year % 100);
+            WriteTwoDigits(month);
+            WriteTwoDigits(day);
+        }
+
+        private void WriteTime(int hour, int minute, int second, int millisecond)
+        {
+            WriteTwoDigits(hour);
+            _buffer[_position++] = (byte)':';
+            WriteTwoDigits(minute);
+            _buffer[_position++] = (byte)':';
+            WriteTwoDigits(second);
+            _buffer[_position++] = (byte)'.';
+            _buffer[_position++] = (byte)('0' + millisecond / 100);
+            WriteTwoDigits(millisecond % 100);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void WriteTwoDigits(int value)
+        {
+            _buffer[_position++] = (byte)('0' + value / 10);
+            _buffer[_position++] = (byte)('0' + value % 10);
         }
 
         /// <summary>
@@ -585,12 +855,19 @@ namespace __NS__.Runtime
         /// </summary>
         public int Finish()
         {
+            EnsureCapacity(0);
             int bodyLength = _position - _bodyStart;
 
             Span<byte> digits = stackalloc byte[BodyLengthPlaceholderWidth + 4];
-            Utf8Formatter.TryFormat(bodyLength, digits, out int digitCount);
+            if (!Utf8Formatter.TryFormat(bodyLength, digits, out int digitCount))
+            {
+                _failed = true;
+                throw new InvalidOperationException(""BodyLength could not be formatted."");
+            }
 
             int delta = digitCount - BodyLengthPlaceholderWidth;
+            // Include both the backpatch shift and the complete 10=ddd<SOH> before moving bytes.
+            EnsureCapacity(delta + 7);
             if (delta != 0)
             {
                 int regionStart = _bodyStart - 1; // the SOH terminating the BodyLength field
@@ -618,11 +895,50 @@ namespace __NS__.Runtime
             return _position;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void WriteTagPrefix(scoped ReadOnlySpan<byte> prefix)
+        {
+            EnsureCapacity(prefix.Length);
+            prefix.CopyTo(_buffer.Slice(_position));
+            _position += prefix.Length;
+        }
+
         private void WriteTagPrefix(int tag)
         {
-            Utf8Formatter.TryFormat(tag, _buffer.Slice(_position), out int written);
+            EnsureCapacity(1);
+            if (!Utf8Formatter.TryFormat(tag, _buffer.Slice(_position), out int written))
+            {
+                ThrowCapacityExceeded();
+            }
+            EnsureCapacity(written + 1);
             _position += written;
             _buffer[_position++] = (byte)'=';
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private readonly void ThrowIfFailed()
+        {
+            if (_failed)
+            {
+                throw new InvalidOperationException(""The writer is invalid after a failed operation. Create a new writer."");
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnsureCapacity(int required)
+        {
+            ThrowIfFailed();
+            if (required > _buffer.Length - _position)
+            {
+                ThrowCapacityExceeded();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowCapacityExceeded()
+        {
+            _failed = true;
+            throw new ArgumentException(""The destination buffer is too small."", ""destination"");
         }
     }
 }
