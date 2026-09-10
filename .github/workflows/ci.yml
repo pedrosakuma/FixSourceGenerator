@@ -50,6 +50,7 @@ jobs:
           done
       - name: Check investigation fixtures and local runner
         run: |
+          dotnet test benchmarks/experiments/eager-projection/tests/EagerProjection.Tests.csproj -c Release
           bash -n scripts/agents/local.sh
           scripts/agents/local.sh --help
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-order-check

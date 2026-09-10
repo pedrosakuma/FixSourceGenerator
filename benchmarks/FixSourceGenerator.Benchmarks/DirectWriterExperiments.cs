@@ -205,11 +205,61 @@ internal sealed class DirectWriterWorkload
         if (FreshOutput) Output = new byte[_adapter.Output.Length];
         return _adapter.Write(dto, Output);
     }
+
+    internal int EagerReadWrite() => EagerReadWriteCore(priceOnlyCount: false);
+    internal int EagerPriceCountReadWrite() => EagerReadWriteCore(priceOnlyCount: true);
+
+    private int EagerReadWriteCore(bool priceOnlyCount)
+    {
+        var header = new Header(Input);
+        int count = header.Count;
+        if (IsFilter)
+        {
+            count = 0;
+            if (priceOnlyCount)
+            {
+                foreach (var row in UndPriceValues.Enumerate(Input))
+                    if (Keep(row.Quote)) count++;
+            }
+            else
+            {
+                foreach (var row in UndEagerValues.Enumerate(Input))
+                    if (Keep(row.Price)) count++;
+            }
+        }
+        if (FreshOutput) Output = new byte[_adapter.Output.Length];
+        var writer = new Native.NativeEnvelopeWriter(Output, _state,
+            header.Sender, header.Target, header.Sequence, header.SendingTime);
+        var group = writer.BeginNoEntries(count);
+        int index = 0;
+        foreach (var row in UndEagerValues.Enumerate(Input))
+        {
+            decimal? price = row.Price;
+            if (IsFilter && !Keep(price)) continue;
+            decimal? size = row.Size;
+            ReadOnlySpan<byte> id = row.EntryID;
+            if (index++ == 0)
+            {
+                for (int step = 0; step < (Edit == DirectEdit.FourEdits ? 4 : 1); step++)
+                {
+                    Numbers(ref price, ref size, step);
+                    if (Edit == DirectEdit.Grow) id = GrowingBytes;
+                    if (Edit == DirectEdit.Shrink) id = "Z"u8;
+                    if (Edit == DirectEdit.FourEdits) id = ReplacementBytes[step];
+                }
+            }
+            var entry = group.BeginEntry(id);
+            if (price.HasValue) entry.SetPrice(price.Value);
+            if (size.HasValue) entry.SetSize(size.Value);
+            group = entry.EndEntry();
+        }
+        return Native.FixWriterScopeExtensions.EndGroup(group).Finish();
+    }
 }
 
 internal static class DirectWriterExperiments
 {
-    internal static void Check()
+    internal static void Check(bool eager = false)
     {
         int checks = 0;
         foreach (int count in new[] { 0, 1, 10, 50 })
@@ -220,7 +270,9 @@ internal static class DirectWriterExperiments
                         var work = new DirectWriterWorkload(count, edit, density, fresh);
                         byte[] original = work.Input.ToArray();
                         for (int repeat = 0; repeat < 3; repeat++)
-                            foreach (var action in new Func<int>[] { work.DirectReadWrite, work.DtoFreshReadWrite })
+                            foreach (var action in eager
+                                ? new Func<int>[] { work.EagerReadWrite, work.EagerPriceCountReadWrite }
+                                : new Func<int>[] { work.DirectReadWrite, work.DtoFreshReadWrite })
                             {
                                 int length = action();
                                 var output = work.Output.AsSpan(0, length);
@@ -240,7 +292,7 @@ internal static class DirectWriterExperiments
                                 checks++;
                             }
                     }
-        Console.WriteLine($"Direct writer checks: {checks} full oracle frames; dense/sparse/mixed, zero/all/some survivors, UTF8, absence/zero, fresh/reused output and writer state.");
+        Console.WriteLine($"{(eager ? "Generated eager" : "Direct")} writer checks: {checks} full oracle frames; dense/sparse/mixed, zero/all/some survivors, UTF8, absence/zero, fresh/reused output and writer state.");
     }
 
     private static void CheckEnvelope(ReadOnlySpan<byte> frame)

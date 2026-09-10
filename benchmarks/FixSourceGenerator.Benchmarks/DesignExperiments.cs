@@ -32,6 +32,7 @@ internal static class DesignExperiments
         CheckNested();
         NativeDtoExperiments.Check();
         DirectWriterExperiments.Check();
+        EagerProjectionExperiments.Check();
         Console.WriteLine("Design fixtures agree: selected values, field orders, nested boundaries and edited envelopes.");
     }
 

@@ -1,7 +1,19 @@
 using BenchmarkDotNet.Running;
 using FixSourceGenerator.Benchmarks;
 
-if (args is ["--direct-writer-load"])
+if (args is ["--eager-check"])
+{
+    EagerProjectionExperiments.Check();
+}
+else if (args is ["--eager-load"])
+{
+    EagerProjectionExperiments.Load();
+}
+else if (args is ["--eager-confirm"])
+{
+    EagerProjectionExperiments.Load(confirmation: true);
+}
+else if (args is ["--direct-writer-load"])
 {
     DirectWriterExperiments.Load();
 }

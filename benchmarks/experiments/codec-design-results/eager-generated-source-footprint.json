@@ -1,0 +1,25 @@
+{
+  "Scope": "Actual emitted source; attributes/shared strict tokenizer once plus two projections",
+  "Not": "Native code size, resident instance size, allocation, or complete application size",
+  "Files": [
+    {
+      "HintName": "ExperimentalEager.Attributes.g.cs",
+      "Utf8Bytes": 1462,
+      "Lines": 33,
+      "Sha256": "76545dc42fc99a0a6b22e64289d9718f9489151a7d20423a10306d3bcf6e1173"
+    },
+    {
+      "HintName": "FixSourceGenerator.Benchmarks.UndEagerValues.Eager.g.cs",
+      "Utf8Bytes": 4108,
+      "Lines": 67,
+      "Sha256": "420a6e64684136ed5af142d1cc717e615da44d528eba43251280f0a7e91f9557"
+    },
+    {
+      "HintName": "FixSourceGenerator.Benchmarks.UndPriceValues.Eager.g.cs",
+      "Utf8Bytes": 3263,
+      "Lines": 51,
+      "Sha256": "2d659a428c4ec8364cce0703c0fec8d59e0ced8fcfecefa117419ecaf0842ca9"
+    }
+  ],
+  "TotalUtf8Bytes": 8833
+}

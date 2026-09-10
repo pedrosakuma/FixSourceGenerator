@@ -24,6 +24,7 @@
        §1) so the benchmarks exercise the actual generated reader/writer, not a hand-rolled stand-in. -->
   <ItemGroup>
     <ProjectReference Include="..\..\src\FixSourceGenerator\FixSourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../experiments/eager-projection/EagerProjection.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <AdditionalFiles Include="Schema\FIX44-mini.xml" />
     <AdditionalFiles Include="Schema/DesignNested.xml" />
     <AdditionalFiles Include="Schema/NativeDto.xml" />

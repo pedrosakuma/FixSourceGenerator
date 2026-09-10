@@ -557,6 +557,236 @@ dotnet "$DLL" --direct-writer-confirm | grep '^{' > benchmarks/experiments/codec
 python3 benchmarks/experiments/shared/direct-writer-summary.py --confirmation > benchmarks/experiments/codec-design-results/direct-writer-confirm-summary.csv
 ```
 
+## Follow-up: actual generated eager enumeration from declaration + dictionary
+
+This round answers the generation question directly, unlike the **handwritten** fused
+scanners in the first round. `benchmarks/experiments/eager-projection/` contains a real,
+isolated Roslyn analyzer project. The benchmark references it as an analyzer and supplies
+the existing `Schema/NativeDto.xml` as an `AdditionalFile`. No production generator,
+runtime, schema, or public API implementation changed. This is still research on draft
+PR #41, not adoption, a proposed stable attribute API, or full FIX50 support.
+
+### What is actually generated
+
+The consumer declaration in `EagerProjections.cs` is:
+
+```csharp
+[ExperimentalEager("NativeDto.xml", "NativeEnvelope", "NoEntries",
+    "FixSourceGenerator.Benchmarks.Generated.Fix.V42.Runtime")]
+internal readonly ref partial struct UndEagerValues
+{
+    public partial ReadOnlySpan<byte> EntryID { get; }
+    public partial decimal? Price { get; }
+    public partial decimal? Size { get; }
+}
+
+// Consumer code contains no tokenizer, tag switch, or handwritten scanner.
+foreach (var row in UndEagerValues.Enumerate(input))
+{
+    decimal? price = row.Price;
+    ReadOnlySpan<byte> id = row.EntryID;
+}
+```
+
+`EagerProjectionGenerator.Execute` resolves the annotated type and partial properties;
+`ReadSchema` resolves dictionary names/tags, the delimiter, count, header and membership;
+`Emit` produces the immutable native value, getters, presence flags and specialized
+enumerator. Numeric backing is `decimal?` plus wire-presence flags, **not wire offsets**.
+Text backing is a borrowed span. The constructor scans the header to the group count;
+`MoveNext` combines entry delimiting/membership with immediate parsing of selected
+numbers. It reads lookahead to establish the entry boundary before publishing `Current`.
+There are no consumer-written per-tag handlers.
+
+The second generated declaration, `UndPriceValues`, selects only Price and exposes it as
+`Quote` using `[ExperimentalField("Price")]`. Unselected Size is scanned structurally but
+not converted. Positive generator tests also change the counter/delimiter/numeric tags
+to 1900–1903, rename the dictionary Price field, reorder metadata and property declarations,
+and add an unused known field. Both variants emit, compile and **execute** real generated
+code with the production generator providing the actual runtime. This is not a
+hardcoded tag-270 fixture or a snapshot-only test.
+
+The production schema parser/model was inspected. It resolves recursive components and
+many types/topologies not implemented here and couples to the production diagnostics.
+Instead of modifying it or pretending to support its full model, the experiment uses a
+small, explicit XML front end and fails closed with `EAGER001`:
+
+- One required direct group as the entire selected message body; no root scalars,
+  sibling groups, nested groups, or component references. **No nested topology is
+  supported.** Such dictionaries are compile-time errors, not silently flattened.
+- Required STRING delimiter, then optional STRING/PRICE/QTY/AMT/FLOAT fields only.
+  Selected strings use `ReadOnlySpan<byte>`; selected numbers use `decimal?`.
+  No required non-delimiter fields, DATA/XMLDATA, enum conversion, arbitrary types,
+  duplicate field definitions/members, unresolved references or overlapping
+  header/count/entry/trailer tags.
+- Scalar header including MsgType(35), CheckSum(10)-only trailer, exactly one matching
+  dictionary filename. Namespace-level, non-generic readonly ref partial structs with
+  public getter-only partial properties; unsupported declarations/member collisions
+  produce diagnostics. The explicit runtime namespace is experimental configuration,
+  not a generally inferred package contract.
+- Unknown/out-of-scope input tags, malformed token structure, wrong/duplicate MsgType,
+  negative/overflow/partially parsed counts, too few/many entries, and missing/trailing
+  tokens are rejected with `FormatException`. `Current` is cleared before advancing,
+  on completion and on failure; subsequent `MoveNext` after failure returns false.
+  This is structural validation, **not a full FIX validator**: it does not verify all
+  required header values, BodyLength, checksum contents or nonempty required strings.
+
+The shared **generated** strict tokenizer checks digit-only positive tags, overflow and
+SOH termination. This is deliberately stricter than the existing production tokenizer,
+whose permissive behavior is not changed. Numeric conversion reuses the production
+`FixSpanReader.TryParseDecimal`: it accepts a valid numeric prefix (`1junk` → `1`).
+Malformed nonnumeric/overflow values remain present but nullable-null; absent values are
+`HasPrice == false`, numeric zero is `HasPrice == true && Price == 0`. First occurrence
+wins even if malformed/empty; a later valid duplicate cannot overwrite it. This matches
+the existing **FixView** policy, whereas the **full reader uses the last occurrence**.
+Tests explicitly assert both policies; timed inputs contain no duplicates. There is no
+claim of equivalent malformed/duplicate-input acceptance across both APIs.
+
+The tokenizer still scans numeric bytes to locate SOH, then the numeric parser consumes
+them. Lookahead delimiter/trailer tokens can also be read again on the next advance.
+“Fused” means structural traversal plus selected conversion, **not each byte read once**.
+
+### Fair work and bounded measurement
+
+`EagerReadWorkload.FullCached`, `LazyCached` (the actual generated `UndLazyValues`
+FixView), and `Eager` select the same identifier/Price/Size and compute the same digest.
+Every variant caches getters in locals, including at Uses4; this does not manufacture
+a win against repeated numeric conversion. `PriceCached`/`PriceEager` separately select
+only Price, including the once-used sparse scalar control.
+
+The full pipeline compares existing `DirectWriterWorkload.DirectReadWrite` with
+`EagerReadWrite`. Both start from the same immutable complete UND bytes, share the
+existing header helper, edits, predicate, scoped writer, reusable writer state and
+preallocated destination, then serialize a complete canonical frame. UND has all three
+entry fields in the projection; this is **not partial X/W re-encoding**. Strings remain
+borrowed until Finish and source/destination do not alias. Setup allocation, delegate
+creation, input/oracle creation and replacement-string encoding are excluded; input
+decoding, filtering/editing and complete output serialization are timed. No DTO
+acquisition or historical timings enter this comparison.
+
+Filtering has two explicitly named eager variants:
+
+| Dense UND50, 31 survivors | Price conversions | Size conversions |
+|---|---:|---:|
+| `DirectReadWrite` | 100 | 31 |
+| `EagerReadWrite` (all-fields projection both passes) | 100 | 100 |
+| `EagerPriceCountReadWrite` (Price-only count, all-fields write pass) | 100 | 50 |
+
+Those counts are for present valid dense fields; absent fields do not invoke a parser.
+The narrow-count variant is **not** silently substituted for the all-fields variant.
+Even it converts Size for rows rejected on the writing pass; the existing baseline
+already avoids Size for rejected rows in both passes. Count prepasses and all their
+work remain timed.
+
+The initial matrix uses 63 cases / 153 method rows, 0.2 s warmup per method, eight
+100 ms blocks: UND 1/10/50, dense/sparse/mixed, read-all/read-Price Uses1/4, complete
+no-edit/four-edits/filter. It was followed by exactly two separate confirmation
+processes, seven selected UND50 cases / 18 rows each, 1 s warmup and eight 1 s blocks.
+Methods rotate within each case/block. No concurrent benchmark/build was launched by
+this experiment, but this shared host cannot exclude unrelated load.
+
+All **1,512 raw blocks** are retained, including the severely disturbed second
+confirmation; no additional “good run” was substituted. Times are medians of eight
+**block means**, not request percentiles, BDN results, confidence intervals or pooled
+process medians. The current raw records contain .NET 10.0.11, Ubuntu 24.04.4, X64,
+workstation GC, process IDs, timings, operations, thread allocation and GC counts.
+
+**UND50 read confirmation, µs, process 1 / process 2:**
+
+| Selected work | Cached full reader | Cached generated FixView | Generated eager |
+|---|---:|---:|---:|
+| Dense, all fields, Uses1 | 7.454 / 16.451 | 9.098 / 16.018 | 6.989 / 12.984 |
+| Sparse, all fields, Uses1 | 2.254 / 4.573 | 3.023 / 4.897 | 1.979 / 3.566 |
+| Sparse, Price only, Uses1 | 2.025 / 4.347 | not measured | 1.613 / 4.914 |
+
+Methods are respectively `FullCached` / `LazyCached` / `Eager`, and
+`PriceCached` / `PriceEager` in the last row. The dense all-field eager median is 6.2%
+lower in process 1 and 21.1% lower in process 2 than the full cached reader, but the
+second process is **not stable confirmation of that magnitude**. Its full-reader
+dense blocks span 9.118–70.107 µs and eager 7.304–49.309 µs. The sparse scalar control
+reverses direction across processes (20.4% lower, then 13.0% higher); do not claim a
+universal win, including for sparse reads.
+
+**UND50 complete pipeline confirmation, µs, process 1 / process 2:**
+
+| Work | `DirectReadWrite` | `EagerReadWrite` | `EagerPriceCountReadWrite` |
+|---|---:|---:|---:|
+| Dense, no edit | 18.365 / 35.830 | 18.333 / 37.742 | not measured |
+| Dense, four logical edits then one write | 19.226 / 28.217 | 19.243 / 27.967 | not measured |
+| Dense, filter 50→31 | 22.323 / 40.533 | 22.431 / 48.406 | 20.872 / 38.656 |
+| Mixed absent/zero, filter 50→10 | 13.120 / 21.461 | 14.535 / 20.335 | 12.248 / 19.202 |
+
+Every measured variant in **all three processes** allocated **0 B/op** on the measured
+thread and recorded zero Gen0/1/2 collections. This is steady-state allocation, not zero
+setup memory or zero generated-code footprint.
+
+**Interpretation:** actual automatic generation of native borrowed values and group
+enumeration works within this bounded schema. Read-only results suggest potential,
+including against cached getters rather than repeated conversions. But the complete
+no-edit/four-edit pipeline shows essentially no consistent improvement: the common
+writer and other work dominate. Eager conversion of unused/rejected Size can regress
+filtering; selecting a narrower generated projection for the count pass helps these
+medians, not a general optimality proof. Initial matrix and confirmation results also
+change direction in some cases; all are available in the CSVs.
+
+These comparisons combine elimination of the full root-reader scan, per-entry
+rescanning/offset construction, generated membership, native backing and a different
+strict tokenizer. They **do not isolate only numeric conversion or fusion** as the
+causal source of a timing delta. No conclusion about a real nested X/W dictionary,
+general API adoption, or replacing the existing reader follows.
+
+### Correctness, footprint, review and reproduction
+
+- 25 targeted xUnit cases: actual emitted C# compiles and executes for two dictionary
+  layouts; 23 unsupported schema/declaration cases produce `EAGER001`, not a crashed
+  generator or silently emitted scanner. These use the existing Roslyn/xUnit versions.
+- `--eager-check` includes 1,152 independent complete writer-oracle comparisons
+  (both eager variants, 0/1/10/50, dense/sparse/mixed, edits, all/some/zero survivors,
+  UTF8, fresh/reused destinations, repeated writer-state reuse). The oracle computes
+  full bytes, BodyLength/checksum independently of either read path.
+- Independent literal tuples assert presence/zero/absence, empty and invalid first
+  duplicates, prefix acceptance/overflow, ordering, first/last entry and empty groups.
+  Invalid dangling tokens/lookahead assert no stale `Current`. The existing FixView
+  and full-reader duplicate policies are tested separately, not hidden behind a digest.
+- `--design-check` includes these new checks; CI also runs the isolated generator
+  tests. Final targeted Release build, all generator tests, and all six existing CI
+  fixture commands passed. Production tests were not broadly rerun because production
+  code was not changed.
+- Actual emitted UTF8 source: **4,108 B** for `UndEagerValues`, **3,263 B** for
+  `UndPriceValues`, **1,462 B** shared attributes/strict tokenizer, **8,833 B total**.
+  Source hashes/line counts are retained in `eager-generated-source-footprint.json`.
+  This is source volume, **not native code size or entire application size**; no native
+  code-size claim is made. Extra declarations replicate specialized enumerator code.
+  A final diagnostics-only tightening produced byte-identical benchmark output hashes,
+  so the measured generated code is the final emitted code.
+- An independent local code reviewer inspected generator, runtime boundary behavior,
+  tests and fairness before measurement and found no significant issues.
+  A separate focused review of raw evidence, summaries and reporting, including the
+  final diagnostic guards, also found no significant issues.
+
+```bash
+# First restore after adding the project references; use your normal/cache NuGet setup.
+dotnet restore benchmarks/FixSourceGenerator.Benchmarks
+dotnet restore benchmarks/experiments/eager-projection/tests/EagerProjection.Tests.csproj
+dotnet test benchmarks/experiments/eager-projection/tests/EagerProjection.Tests.csproj \
+  -c Release --no-restore
+dotnet build benchmarks/FixSourceGenerator.Benchmarks -c Release --no-restore \
+  -p:EmitCompilerGeneratedFiles=true -p:CompilerGeneratedFilesOutputPath=obj/eager-generated
+DLL=benchmarks/FixSourceGenerator.Benchmarks/bin/Release/net10.0/FixSourceGenerator.Benchmarks.dll
+dotnet "$DLL" --eager-check
+dotnet "$DLL" --design-check
+set -o pipefail
+dotnet "$DLL" --eager-load | grep '^{' > benchmarks/experiments/codec-design-results/eager-generated-run1.jsonl
+dotnet "$DLL" --eager-confirm | grep '^{' > benchmarks/experiments/codec-design-results/eager-generated-confirm-run1.jsonl
+dotnet "$DLL" --eager-confirm | grep '^{' > benchmarks/experiments/codec-design-results/eager-generated-confirm-run2.jsonl
+python3 benchmarks/experiments/shared/eager-generated-summary.py > benchmarks/experiments/codec-design-results/eager-generated-summary.csv
+python3 benchmarks/experiments/shared/eager-generated-summary.py --confirmation > benchmarks/experiments/codec-design-results/eager-generated-confirm-summary.csv
+python3 benchmarks/experiments/shared/eager-generated-summary.py --source-footprint > benchmarks/experiments/codec-design-results/eager-generated-source-footprint.json
+```
+
+The summary script verifies row/case counts, eight samples, raw medians/min/max,
+allocation/GC arithmetic and paired input/output dimensions. The untouched previous
+rounds above remain historical evidence, not comparison baselines for this round.
+
 ## Temporal reader (#30)
 
 From an experimental worktree rooted at prework commit `a0b1aab`:
