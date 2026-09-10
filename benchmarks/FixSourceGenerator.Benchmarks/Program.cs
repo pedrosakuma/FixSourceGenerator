@@ -7,6 +7,13 @@ if (args is ["--writer-codegen"])
     writer.CheckEquivalentFrames();
     Console.WriteLine($"X={writer.X_ScaledAndIntegral()} W={writer.W_ScaledAndIntegral()}");
 }
+else if (args is ["--writer-pipeline-check"])
+{
+    foreach (int entries in new[] { 1, 10, 50 })
+        foreach (string message in new[] { "X", "W" })
+            new WriterPipelineBenchmarks { Entries = entries, Message = message }.Setup();
+    Console.WriteLine("Raw, checked-context, scoped and in-place writer frames agree for X/W at 1/10/50 entries.");
+}
 else if (args is ["--reader-order-check"])
 {
     foreach (int entries in new[] { 1, 10, 50 })

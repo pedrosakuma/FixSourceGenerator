@@ -37,6 +37,8 @@ public static class StackInputCompilation
             .SkipMessageEncoding()
             .SkipLastMsgSeqNumProcessed()
             .SkipNoHops(scratch[..written]);
+        complete.SetSignatureLength(written);
+        complete.SetSignature(scratch[..written]);
         scratch.Clear();
         return complete.Finish();
     }

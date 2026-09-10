@@ -66,8 +66,12 @@ a getting-started guide, a worked example, and the schema-versioning guide. The 
    var message = new NewOrderSingleWriter(destination, state, "ORD-1"u8);
    var instrument = message.BeginInstrument("MSFT"u8);
    var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
-   int length = tail.SkipPrice().SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
+   tail.SetPrice(101.25m);
+   int length = tail.SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
    ```
+
+Optional-only tails support in-place `Set{Field}` calls: the current handle remains valid and
+older copies become stale. Fluent `Write`/`Skip` and scope transitions still consume their source.
 
 See [`docs/USAGE.md`](docs/USAGE.md) for the full worked example (including components and
 nested groups) and guidance on versioning schemas over time.

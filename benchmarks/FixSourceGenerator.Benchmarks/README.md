@@ -30,7 +30,51 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
-### Shared scoped writers (#31): memory blocker resolved, encoding cost remains
+### Same-build writer pipeline investigation and in-place setters (#31)
+
+`WriterPipelineBenchmarks` compares identical X/W frames in one binary:
+
+- `Raw`: constant-prefix span encoding, capacity checks and envelope finalization.
+- `StateAndCounts`: also initializes the same bounded metadata and enforces generation,
+  poison, entry delimiters, expected counts and closure. It does **not** enforce all generated
+  field-order/domain/required-scope rules, so it is a diagnostic lower bound, not a replacement API.
+- `Scoped`: the generated fluent API with its complete schema checks and consuming handoffs.
+- `InPlace`: the same generated API, using `Set{Field}` for optional-only scalar tails, while
+  retaining required factories and consuming component/group transitions.
+
+The initial 1/50-entry experiment showed severe variance for X/50 in-place (42.57 us mean,
+15.26 us SD). It was not accepted as a speed estimate. A longer, serial 50-entry rerun used
+**two launches, five warmups and ten measured iterations per launch**, with no concurrent builds:
+
+| Message, 50 entries | Raw mean (SD), us | State/count mean (SD), us | Fluent mean (SD), us | In-place mean (SD), us |
+|--------------------|------------------:|-------------------------:|--------------------:|----------------------:|
+| W | 15.99 (0.204) | 20.76 (0.538) | 31.96 (0.899) | 23.37 (0.608) |
+| X | 17.05 (0.334) | 22.24 (0.426) | 38.88 (0.414) | 26.96 (0.520) |
+
+Host: EPYC 7763, Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11, BDN 0.15.8, Release.
+All four paths produce exactly equal bytes, including BodyLength and CheckSum, at 1/10/50
+entries. No warmed managed allocation was reported. State/count safety adds about 30% to raw
+encoding here; generated fluent handoffs add substantially more. In-place means are about
+**27% lower for W and 31% lower for X** than fluent, while retaining generated validation.
+This isolates API-layer overhead (calls/returns/copies), not a measured cost for each individual
+machine instruction. In-place remains 46-58% above raw; raw omits important guarantees.
+
+Small-message performance is not universally improved: the exploratory W/1 means were about
+1.97 us fluent and 1.98 us in-place, where the fixed scope-transition cost dominates. Do not
+extrapolate the 50-entry gains to every schema or frame size.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*WriterPipelineBenchmarks*50*' \
+  --launchCount 2 --warmupCount 5 --iterationCount 10 --buildTimeout 600
+```
+
+The confirmation run temporarily selected only 50-entry parameters; the checked-in benchmark
+also includes one-entry frames. The filter above selects the 50-entry cases.
+The new setters preserve net6/C#11 and the complete FIX44/FIX50SP2 2 GiB managed-heap comparison.
+
+### Before in-place setters: shared scoped writers (#31)
 
 Component/group definitions now produce shared generic templates parameterized by ordinary
 continuation marker structs. Marker-specific closure extensions preserve fluent parent returns

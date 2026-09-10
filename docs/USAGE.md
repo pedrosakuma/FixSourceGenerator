@@ -150,6 +150,28 @@ The typed state span is bounded by maximum group nesting, must not overlap the d
 must remain alive and exclusive until completion. `InitializeState` is idempotent after completion
 but rejects live ownership; it never resets the generation.
 
+### In-place writes in optional-only tails
+
+Once all remaining fields/scopes are optional, scalar fields also expose `void Set{Field}(...)`.
+For example, instead of the fluent optional-field portion above:
+
+```csharp
+var tail = instrument.EndInstrument(Side.Buy, 100m);
+tail.SetPrice(101.25m);
+tail.SetTransactTime(new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+int length = tail.SkipExecInst().SkipNoAllocs().Finish();
+```
+
+`Set` updates the current handle in place; copies taken before it become stale. `Write`, `Skip`
+and scope transitions still consume their source and require using the returned handle.
+Both forms share validation, schema-order checks, poisoning and immediate copying of scoped
+span inputs. Numeric `Set` methods have the same decimal, integral and scaled overloads as `Write`.
+Missing optional fields remain omitted; zero/false are explicit values, not absence sentinels.
+
+`Set` is not generated for required inputs or phases that must advance past required fields or
+scopes. Use constructors/factories and fluent transitions there. In-place setters are useful
+in entry loops, but do not guarantee a speedup for small frames dominated by scope transitions.
+
 ### Destination capacity and failures
 
 The constructor, field setters (including group counters), and `Finish()` throw

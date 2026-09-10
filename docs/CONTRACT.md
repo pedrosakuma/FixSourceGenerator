@@ -621,6 +621,15 @@ O protótipo antigo por valor permanece no arquivo apenas para comparar wire ord
 renovam o epoch e invalidam cópias anteriores; transições entregam o novo epoch somente ao
 handle retornado. Os tipos `Proto*` não são templates para essa implementação.
 
+**Setters in-place:** caudas exclusivamente opcionais também expõem `void Set{Campo}(...)`.
+O handle atual recebe o novo epoch e continua válido; cópias anteriores tornam-se obsoletas.
+Não há um novo handle retornado nem mudança de fase. `Write{Campo}` reutiliza a mesma validação
+e escrita, mas continua consumindo a origem e devolvendo um handle novo, assim como `Skip` e as
+transições de escopo. Ambas as formas preservam ordem, poison, contagem e cópia imediata de spans;
+misturá-las é permitido respeitando quais operações consomem a origem. Campos obrigatórios e
+fases anteriores a escopos obrigatórios não ganham `Set`, portanto os construtores/factories
+continuam obrigatórios. Nenhuma mudança de linguagem/runtime é necessária.
+
 ### 12.5 Ordem no wire quando campos obrigatórios e opcionais se intercalam; lifetime de spans de entrada
 
 - **Ordem no wire:** as fases restringem as transições estruturais; a próxima rajada

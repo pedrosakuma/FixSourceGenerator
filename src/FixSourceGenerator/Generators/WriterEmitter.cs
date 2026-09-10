@@ -423,32 +423,45 @@ namespace FixSourceGenerator.Generators
             string ordinal = order.ToString(CultureInfo.InvariantCulture);
 
             w.Line();
-            w.Open($"public {phaseType} Write{stem}({declaration})");
+            w.Open($"public void Set{stem}({declaration})");
             EmitOrderGuard(w, ordinal);
             EmitValidatedWrite(w, field, value);
-            w.Line($"return new {phaseType}(_context.Take(), {ordinal}, marker: default);");
+            w.Line($"_order = {ordinal};");
             w.Close();
+            EmitTailWriteWrapper(w, phaseType, stem, declaration, value, ordinal);
 
             if (TypeTranslator.Translate(field.Type).Category == FixTypeCategory.Decimal)
             {
                 w.Line();
-                w.Open($"public {phaseType} Write{stem}(long {value})");
+                w.Open($"public void Set{stem}(long {value})");
                 EmitOrderGuard(w, ordinal);
                 w.Line($"_context.WriteField(\"{field.Number.ToString(CultureInfo.InvariantCulture)}=\"u8, {value});");
-                w.Line($"return new {phaseType}(_context.Take(), {ordinal}, marker: default);");
+                w.Line($"_order = {ordinal};");
                 w.Close();
+                EmitTailWriteWrapper(w, phaseType, stem, $"long {value}", value, ordinal);
                 w.Line();
-                w.Open($"public {phaseType} Write{stem}(long {value}, int scale)");
+                w.Open($"public void Set{stem}(long {value}, int scale)");
                 EmitOrderGuard(w, ordinal);
                 w.Line($"_context.WriteField(\"{field.Number.ToString(CultureInfo.InvariantCulture)}=\"u8, {value}, scale);");
-                w.Line($"return new {phaseType}(_context.Take(), {ordinal}, marker: default);");
+                w.Line($"_order = {ordinal};");
                 w.Close();
+                EmitTailWriteWrapper(w, phaseType, stem, $"long {value}, int scale", $"{value}, scale", ordinal);
             }
 
             w.Line();
             w.Open($"public {phaseType} Skip{stem}()");
             EmitOrderGuard(w, ordinal);
             w.Line($"return new {phaseType}(_context.Transfer(), {ordinal}, marker: default);");
+            w.Close();
+        }
+
+        private static void EmitTailWriteWrapper(
+            CodeWriter w, string phaseType, string stem, string parameters, string arguments, string ordinal)
+        {
+            w.Line();
+            w.Open($"public {phaseType} Write{stem}({parameters})");
+            w.Line($"Set{stem}({arguments});");
+            w.Line($"return new {phaseType}(_context.Take(), {ordinal}, marker: default);");
             w.Close();
         }
 
