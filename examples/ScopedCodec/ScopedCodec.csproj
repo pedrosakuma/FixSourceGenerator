@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net6.0;net9.0</TargetFrameworks>
+    <LangVersion>11</LangVersion>
+    <LangVersion Condition="'$(TargetFramework)' == 'net9.0'">13</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <FixGeneratorNamespace>Acme</FixGeneratorNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/FixSourceGenerator/FixSourceGenerator.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <AdditionalFiles Include="../../tests/FixSourceGenerator.Tests/TestData/FIX44-mini.xml"
+                     Link="Schema/FIX44-mini.xml" />
+    <CompilerVisibleProperty Include="FixGeneratorNamespace" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net6.0'">
+    <Compile Remove="ProjectionExample.cs" />
+  </ItemGroup>
+</Project>

@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
 public static class FixTestDriver
 {
@@ -99,11 +100,12 @@ public static class FixTestDriver
     public static byte[] EncodeMinimal()
     {
         var dest = new byte[256];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteClOrdID(A(""ABC""));
-        w.WriteSide(Side.Buy);
-        w.WriteOrderQty(100m);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, A(""ABC""));
+        var instrument = message.BeginInstrument(A(""MSFT""));
+        var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
+        int len = tail.SkipPrice().SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;
@@ -112,17 +114,15 @@ public static class FixTestDriver
     public static byte[] EncodeWithGroup()
     {
         var dest = new byte[512];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteClOrdID(A(""ORD1""));
-        w.WriteSymbol(A(""MSFT""));
-        w.WriteSide(Side.Sell);
-        w.WriteOrderQty(50m);
-        w.WriteNoAllocs(2);
-        w.WriteAllocAccount(A(""ACC1""));
-        w.WriteAllocQty(10m);
-        w.WriteAllocAccount(A(""ACC2""));
-        w.WriteAllocQty(20m);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, A(""ORD1""));
+        var instrument = message.BeginInstrument(A(""MSFT""));
+        var tail = instrument.SkipSecurityID().EndInstrument(Side.Sell, 50m);
+        var group = tail.SkipPrice().SkipTransactTime().SkipExecInst().BeginNoAllocs(2);
+        group = group.BeginEntry(A(""ACC1""), 10m).SkipNoNested().EndEntry();
+        group = group.BeginEntry(A(""ACC2""), 20m).SkipNoNested().EndEntry();
+        int len = group.EndGroup().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;
@@ -236,7 +236,7 @@ public static class FixTestDriver
         var actual = Call<byte[]>(driver, "EncodeMinimal");
 
         // Independently hand-construct the expected wire message.
-        string body = "35=D\u000111=ABC\u000154=1\u000138=100\u0001";
+        string body = "35=D\u000111=ABC\u000155=MSFT\u000154=1\u000138=100\u0001";
         int bodyLength = body.Length; // all ASCII, 1 byte each
         string head = "8=FIX.4.4\u00019=" + bodyLength + "\u0001";
         string preChecksum = head + body;
@@ -254,7 +254,7 @@ public static class FixTestDriver
         Assert.Equal(expectedBytes, actual);
 
         // Sanity: BodyLength value and CheckSum value are the specific expected numbers.
-        Assert.Equal(24, bodyLength);
+        Assert.Equal(32, bodyLength);
     }
 
     [Fact]

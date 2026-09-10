@@ -6,12 +6,35 @@ versions until `1.0.0`.
 
 ## [Unreleased]
 
+### Breaking
+- Replace flat generated writers with scoped message/component/group-entry phases. Required
+  scalar runs are constructor/factory arguments; `Write`/`Skip` and scope transitions return
+  the next handle and consume their source. There is no compatibility facade for the old
+  generated writer API (#31). See [`docs/MIGRATION.md`](docs/MIGRATION.md).
+- Require caller-owned `Span<FixWriterState>` sized by `RequiredStateLength`. Shared generations
+  reject stale copies, active-parent reuse and writes after failure; group entry counts are
+  supplied upfront and checked at closure. Use typed allocation, not fixed byte sizes.
+
 ### Fixed
 - Writer capacity failures now throw `ArgumentException` (`destination`) consistently across
   envelope fields, values, group counters, and finalization. A failed writer rejects further
   operations with `InvalidOperationException`, preventing malformed success-shaped frames (#23).
+- Widen shared/handle writer generations to 64 bits: sustained reuse exhausted the old 32-bit
+  counter after about 2.63 million X/50 messages. Exhaustion still fails closed without wrapping.
 
 ### Added
+- In-place optional-tail `Set{Field}` calls preserve the current handle while invalidating older
+  copies. Required inputs remain on constructors/factories; empty text, invalid enum/CHAR
+  values and duplicate/backward writes are rejected by generated writers (#31).
+- A runnable net6/C#11 and net9/C#13 migration example with scoped writing, state reuse,
+  absent/zero/nonzero values and qualified-entry projections, exercised in CI (#34).
+- Paired encode/decode/consume benchmarks, bounded sampled loads and separate metadata/code-size
+  accounting. Shared writer templates and view skip helpers reduce generated duplication.
+- Generated `[FixView]` component/qualified-entry projections with scoped group lookup,
+  first-occurrence scalar selection, optional-span presence helpers and raw `CurrentSpan`
+  access without constructing the full entry reader (#32). Children of optional components
+  are contextually optional; affected scalar projections must use nullable property types.
+  Ordinary reader/writer consumers retain the net6/C#11 floor; FixView still requires C#13.
 - Scoped reader/writer API contract design (docs/CONTRACT.md §12) for the next-generation
   generated shape: per-scope required constructors/factories, optional-component/required-group
   contextual requiredness, group-count policy comparison (upfront count vs. backpatch), and
@@ -34,9 +57,10 @@ versions until `1.0.0`.
   invariant formatting, and supplied DateTime clock fields without implicit timezone conversion (#27).
 - Generated setters copy compile-time ASCII tag prefixes through shared runtime value formatters.
   Dynamic integer-tag runtime APIs and envelope backpatching are unchanged (#24).
-- Generated repeating groups sort their membership tags at generation time and use binary search
-  for sets larger than 16 tags. Small sets retain linear lookup, and the public runtime enumerator
-  still accepts unsorted tags. Wire-order delimiters and nested-group boundaries are unchanged.
+- Generated repeating groups retain linear lookup through 16 tags. Larger sets use a bitmap
+  only within 8 KiB and no larger than the replaced sorted-array payload; sparse/high tags fall
+  back to binary search. No duplicate lookup structures are retained. The public runtime
+  enumerator still accepts unsorted tags; nested-group/delimiter behavior is unchanged (#33).
 
 ## [0.1.0] - 2026-08-27
 

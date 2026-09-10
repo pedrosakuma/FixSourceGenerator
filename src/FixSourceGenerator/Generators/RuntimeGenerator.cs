@@ -28,9 +28,581 @@ using System.Buffers.Text;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace __NS__.Runtime
 {
+    /// <summary>Allocation-free required-input carrier for decimal, integral and scaled FIX values.</summary>
+    public readonly struct FixDecimal
+    {
+        private readonly decimal _decimal;
+        private readonly long _mantissa;
+        private readonly int _scale;
+        private readonly bool _scaled;
+
+        private FixDecimal(decimal value)
+        {
+            _decimal = value;
+            _mantissa = 0;
+            _scale = 0;
+            _scaled = false;
+        }
+
+        private FixDecimal(long mantissa, int scale)
+        {
+            _decimal = 0;
+            _mantissa = mantissa;
+            _scale = scale;
+            _scaled = true;
+        }
+
+        public static implicit operator FixDecimal(decimal value) => new FixDecimal(value);
+
+        public static implicit operator FixDecimal(long value) => new FixDecimal(value, 0);
+
+        public static FixDecimal FromScaled(long mantissa, int scale) => new FixDecimal(mantissa, scale);
+
+        internal bool IsScaled => _scaled;
+        internal bool HasValidScale => !_scaled || (_scale >= 0 && _scale <= 18);
+        internal decimal Decimal => _decimal;
+        internal long Mantissa => _mantissa;
+        internal int Scale => _scale;
+    }
+
+    internal readonly struct FixWriterOptionalTailMarker
+    {
+    }
+
+    /// <summary>
+    /// Caller-owned metadata for generated scoped writers. Initialize the complete span once with
+    /// <see cref=""Initialize""/> before its first use. A completed or failed state may be acquired
+    /// again without reinitialization; its generation is advanced so old handles stay stale.
+    /// </summary>
+    public struct FixWriterState
+    {
+        private const int Initialized = unchecked((int)0x46575331);
+
+        internal int Marker;
+        internal int Status;
+        internal long Generation;
+        internal int ExpectedCount;
+        internal int ActualCount;
+        internal int EntryActive;
+        internal int DelimiterTag;
+        internal int DelimiterWritten;
+
+        public static void Initialize(Span<FixWriterState> state)
+        {
+            if (state.IsEmpty)
+            {
+                throw new ArgumentException(""Writer state must not be empty."", nameof(state));
+            }
+
+            if (state[0].Marker == Initialized)
+            {
+                for (int i = 1; i < state.Length; i++)
+                {
+                    if (state[i].Marker != Initialized)
+                    {
+                        throw new ArgumentException(""Writer state is only partially initialized."", nameof(state));
+                    }
+                }
+                if (state[0].Status == 1)
+                {
+                    throw new InvalidOperationException(""The writer state is already owned by a live message."");
+                }
+                return;
+            }
+
+            state.Clear();
+            for (int i = 0; i < state.Length; i++)
+            {
+                state[i].Marker = Initialized;
+            }
+        }
+
+        internal static bool IsInitialized(in FixWriterState state) => state.Marker == Initialized;
+    }
+
+    /// <summary>
+    /// Shared engine used by generated scoped handles. The destination and state are caller-owned
+    /// and must remain alive, non-overlapping and exclusive until the message is finished.
+    /// </summary>
+    public ref struct FixWriterContext
+    {
+        private Span<FixWriterState> _state;
+        private FixSpanWriter _writer;
+        private long _generation;
+        private int _groupDepth;
+
+        public static FixWriterContext Begin(
+            Span<byte> destination,
+            Span<FixWriterState> state,
+            int requiredStateLength,
+            scoped ReadOnlySpan<byte> beginString,
+            scoped ReadOnlySpan<byte> msgType)
+        {
+            if (requiredStateLength < 1 || state.Length < requiredStateLength)
+            {
+                throw new ArgumentException(""The writer state span is too small for this message."", nameof(state));
+            }
+
+            state = state.Slice(0, requiredStateLength);
+            if (destination.Overlaps(MemoryMarshal.AsBytes(state)))
+            {
+                throw new ArgumentException(""Writer state must not overlap the FIX destination."", nameof(state));
+            }
+
+            for (int i = 0; i < state.Length; i++)
+            {
+                if (!FixWriterState.IsInitialized(in state[i]))
+                {
+                    throw new ArgumentException(""Initialize the writer state before its first use."", nameof(state));
+                }
+            }
+
+            ref FixWriterState root = ref state[0];
+            if (root.Status == 1)
+            {
+                throw new InvalidOperationException(""The writer state is already owned by a live message."");
+            }
+            if (root.Generation == long.MaxValue)
+            {
+                throw new InvalidOperationException(""The writer state generation is exhausted."");
+            }
+
+            for (int i = 1; i < state.Length; i++)
+            {
+                state[i].Status = 0;
+                state[i].ExpectedCount = 0;
+                state[i].ActualCount = 0;
+                state[i].EntryActive = 0;
+                state[i].DelimiterTag = 0;
+                state[i].DelimiterWritten = 0;
+            }
+
+            root.Status = 1;
+            root.Generation++;
+            var context = new FixWriterContext
+            {
+                _state = state,
+                _writer = new FixSpanWriter(destination),
+                _generation = root.Generation,
+                _groupDepth = 0,
+            };
+
+            try
+            {
+                context._writer.BeginMessage(beginString, msgType);
+                return context;
+            }
+            catch (ArgumentException)
+            {
+                context.PoisonCore();
+                throw;
+            }
+            catch (InvalidOperationException)
+            {
+                context.PoisonCore();
+                throw;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly void Validate()
+        {
+            if (_state.IsEmpty ||
+                _generation == 0 ||
+                _state[0].Status != 1 ||
+                _state[0].Generation != _generation)
+            {
+                ThrowInvalidHandle();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowInvalidHandle() =>
+            throw new InvalidOperationException(""The writer handle is default, stale, completed, or failed."");
+
+        public void Poison()
+        {
+            Validate();
+            PoisonCore();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateOrder(int currentOrder, int nextOrder)
+        {
+            if (currentOrder >= nextOrder)
+            {
+                // Successful paths validate in the following mutation; rejection must not poison a stale owner.
+                Validate();
+                ThrowInvalidOrder();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowInvalidOrder()
+        {
+            PoisonCore();
+            throw new InvalidOperationException(""A field or scope cannot be emitted twice or out of schema order."");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateText(scoped ReadOnlySpan<byte> value, string fieldName, string parameterName)
+        {
+            if (value.IsEmpty)
+            {
+                Validate();
+                ThrowEmptyText(fieldName, parameterName);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowEmptyText(string fieldName, string parameterName)
+        {
+            PoisonCore();
+            throw new ArgumentException(""An explicit "" + fieldName + "" value must not be empty."", parameterName);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateCode(bool isValid, string parameterName)
+        {
+            if (!isValid)
+            {
+                Validate();
+                ThrowInvalidCode(parameterName);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowInvalidCode(string parameterName)
+        {
+            PoisonCore();
+            throw new ArgumentOutOfRangeException(parameterName);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, scoped ReadOnlySpan<byte> value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, int value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, long value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, long mantissa, int scale)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, mantissa, scale);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, decimal value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, FixDecimal value)
+        {
+            if (!value.HasValidScale)
+            {
+                Validate();
+                PoisonCore();
+                throw new ArgumentOutOfRangeException(""scale"", ""Scale must be between 0 and 18."");
+            }
+            if (value.IsScaled)
+            {
+                WriteField(prefix, value.Mantissa, value.Scale);
+            }
+            else
+            {
+                WriteField(prefix, value.Decimal);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, bool value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, char value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, DateTime value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, DateOnly value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteField(scoped ReadOnlySpan<byte> prefix, TimeOnly value)
+        {
+            PrepareMutation();
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
+        }
+
+        public FixWriterContext Transfer()
+        {
+            Renew();
+            return Take();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal FixWriterContext Take()
+        {
+            var next = this;
+            _generation = 0;
+            return next;
+        }
+
+        public void BeginGroup(scoped ReadOnlySpan<byte> prefix, int expectedCount)
+        {
+            Validate();
+            if (expectedCount < 0)
+            {
+                PoisonCore();
+                throw new ArgumentOutOfRangeException(nameof(expectedCount));
+            }
+            if (_groupDepth + 1 >= _state.Length)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""The generated writer state is too small for the group nesting depth."");
+            }
+
+            WriteField(prefix, expectedCount);
+            _groupDepth++;
+            ref FixWriterState frame = ref _state[_groupDepth];
+            frame.Status = 1;
+            frame.ExpectedCount = expectedCount;
+            frame.ActualCount = 0;
+            frame.EntryActive = 0;
+        }
+
+        public void BeginEntry(int delimiterTag)
+        {
+            Validate();
+            ref FixWriterState frame = ref CurrentGroup();
+            if (frame.EntryActive != 0 || frame.ActualCount >= frame.ExpectedCount)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""A group entry is already active or exceeds expectedCount."");
+            }
+
+            EnsureCanRenew();
+            frame.EntryActive = 1;
+            frame.DelimiterTag = delimiterTag;
+            frame.DelimiterWritten = 0;
+            RenewCore();
+        }
+
+        public void EndEntry()
+        {
+            Validate();
+            ref FixWriterState frame = ref CurrentGroup();
+            if (frame.EntryActive == 0 || frame.DelimiterWritten == 0)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""No group entry is active or its delimiter was not written first."");
+            }
+
+            EnsureCanRenew();
+            frame.EntryActive = 0;
+            frame.DelimiterTag = 0;
+            frame.DelimiterWritten = 0;
+            frame.ActualCount++;
+            RenewCore();
+        }
+
+        public void EndGroup()
+        {
+            Validate();
+            ref FixWriterState frame = ref CurrentGroup();
+            if (frame.EntryActive != 0 || frame.ActualCount != frame.ExpectedCount)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""The number of completed group entries does not match expectedCount."");
+            }
+
+            EnsureCanRenew();
+            frame.Status = 0;
+            frame.ExpectedCount = 0;
+            frame.ActualCount = 0;
+            _groupDepth--;
+            RenewCore();
+        }
+
+        public int Finish()
+        {
+            Validate();
+            if (_groupDepth != 0)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""A child group is still active."");
+            }
+
+            EnsureCanRenew();
+            try
+            {
+                int length = _writer.Finish();
+                _state[0].Status = 2;
+                RenewCore();
+                _generation = 0;
+                return length;
+            }
+            catch (ArgumentException)
+            {
+                PoisonCore();
+                throw;
+            }
+            catch (InvalidOperationException)
+            {
+                PoisonCore();
+                throw;
+            }
+        }
+
+        private ref FixWriterState CurrentGroup()
+        {
+            if (_groupDepth == 0 || _state[_groupDepth].Status != 1)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""No group scope is active."");
+            }
+
+            return ref _state[_groupDepth];
+        }
+
+        private void PrepareMutation()
+        {
+            Validate();
+            EnsureCanRenew();
+            // A write is committed only on normal return; any exception leaves every handle poisoned.
+            _state[0].Status = -1;
+            RenewCore();
+        }
+
+        private void ValidateEntryDelimiter(scoped ReadOnlySpan<byte> prefix)
+        {
+            if (_groupDepth == 0)
+            {
+                return;
+            }
+
+            ref FixWriterState frame = ref _state[_groupDepth];
+            if (frame.EntryActive == 0 || frame.DelimiterWritten != 0)
+            {
+                return;
+            }
+
+            int tag = 0;
+            int index = 0;
+            while (index < prefix.Length && prefix[index] >= (byte)'0' && prefix[index] <= (byte)'9')
+            {
+                tag = checked(tag * 10 + prefix[index] - (byte)'0');
+                index++;
+            }
+            if (index == 0 || index >= prefix.Length || prefix[index] != (byte)'=' || tag != frame.DelimiterTag)
+            {
+                PoisonCore();
+                throw new InvalidOperationException(""The first field of a group entry must be its structural delimiter."");
+            }
+
+            frame.DelimiterWritten = 1;
+        }
+
+        private void Renew()
+        {
+            Validate();
+            EnsureCanRenew();
+            RenewCore();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnsureCanRenew()
+        {
+            if (_state[0].Generation == long.MaxValue)
+            {
+                ThrowGenerationExhausted();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowGenerationExhausted()
+        {
+            _state[0].Status = -1;
+            _generation = 0;
+            throw new InvalidOperationException(""The writer state generation is exhausted."");
+        }
+
+        private void RenewCore()
+        {
+            _state[0].Generation++;
+            _generation = _state[0].Generation;
+        }
+
+        private void PoisonCore()
+        {
+            if (!_state.IsEmpty)
+            {
+                _state[0].Status = -1;
+                if (_state[0].Generation != long.MaxValue)
+                {
+                    _state[0].Generation++;
+                }
+            }
+            _generation = 0;
+        }
+    }
+
     /// <summary>
     /// Forward-only, allocation-free scanner over a FIX tag=value byte buffer. Exposes both an
     /// instance forward cursor and static random-access helpers used by generated readers.
@@ -400,12 +972,17 @@ namespace __NS__.Runtime
     /// are supplied by the generated code (known at compile time — no runtime dictionary lookup),
     /// which is what makes repeating groups allocation-minimal (docs/CONTRACT.md §6).
     /// </summary>
+    // Returns zero for a scalar, one for a skipped nested group, and minus one for malformed input.
+    internal delegate int FixNestedGroupSkipper(ReadOnlySpan<byte> buffer, int tag, int valueStart, int valueLength, int next, out int end);
+
     public ref struct FixGroupEnumerator
     {
         private readonly ReadOnlySpan<byte> _buffer;
         private readonly ReadOnlySpan<int> _entryTags;
         private readonly int _delimiterTag;
         private readonly bool _binarySearch;
+        private readonly bool _bitmapEntryTags;
+        private readonly FixNestedGroupSkipper? _nestedGroupSkipper;
         private int _position;
         private int _remaining;
         private ReadOnlySpan<byte> _current;
@@ -415,12 +992,14 @@ namespace __NS__.Runtime
         {
         }
 
-        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags)
+        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags, FixNestedGroupSkipper? nestedGroupSkipper = null, bool bitmapEntryTags = false)
         {
             _buffer = buffer;
             _entryTags = entryTags;
             _delimiterTag = delimiterTag;
             _binarySearch = sortedEntryTags && entryTags.Length > 16;
+            _bitmapEntryTags = bitmapEntryTags;
+            _nestedGroupSkipper = nestedGroupSkipper;
             _current = default;
             _remaining = 0;
             _position = buffer.Length;
@@ -448,7 +1027,7 @@ namespace __NS__.Runtime
                 return false;
             }
 
-            if (!FixSpanReader.TryReadField(_buffer, _position, out int tag, out _, out _, out int afterDelimiter) || tag != _delimiterTag)
+            if (!FixSpanReader.TryReadField(_buffer, _position, out int tag, out int firstValueStart, out int firstValueLength, out int afterDelimiter) || tag != _delimiterTag)
             {
                 _remaining = 0;
                 return false;
@@ -456,13 +1035,39 @@ namespace __NS__.Runtime
 
             int entryStart = _position;
             int cursor = afterDelimiter;
-            while (FixSpanReader.TryReadField(_buffer, cursor, out int nextTag, out _, out _, out int next))
+            if (_nestedGroupSkipper != null)
+            {
+                int skipped = _nestedGroupSkipper(_buffer, tag, firstValueStart, firstValueLength, afterDelimiter, out int end);
+                if (skipped < 0)
+                {
+                    _remaining = 0;
+                    _current = default;
+                    return false;
+                }
+                if (skipped > 0)
+                    cursor = end;
+            }
+            while (FixSpanReader.TryReadField(_buffer, cursor, out int nextTag, out int valueStart, out int valueLength, out int next))
             {
                 if (nextTag == _delimiterTag || !Contains(nextTag))
                 {
                     break;
                 }
-
+                if (_nestedGroupSkipper != null)
+                {
+                    int skipped = _nestedGroupSkipper(_buffer, nextTag, valueStart, valueLength, next, out int end);
+                    if (skipped < 0)
+                    {
+                        _remaining = 0;
+                        _current = default;
+                        return false;
+                    }
+                    if (skipped > 0)
+                    {
+                        cursor = end;
+                        continue;
+                    }
+                }
                 cursor = next;
             }
 
@@ -475,6 +1080,11 @@ namespace __NS__.Runtime
         private readonly bool Contains(int tag)
         {
             var tags = _entryTags;
+            if (_bitmapEntryTags)
+            {
+                uint word = (uint)tag >> 5;
+                return word < (uint)tags.Length && (tags[(int)word] & (1 << (tag & 31))) != 0;
+            }
             if (_binarySearch)
             {
                 int low = 0;

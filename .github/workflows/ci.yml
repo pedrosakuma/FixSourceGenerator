@@ -37,6 +37,10 @@ jobs:
         run: dotnet build FixSourceGenerator.sln --no-restore -c Release
       - name: Test
         run: dotnet test FixSourceGenerator.sln --no-build -c Release
+      - name: Run migration example
+        run: |
+          dotnet run --no-build -c Release -f net6.0 --project examples/ScopedCodec
+          dotnet run --no-build -c Release -f net9.0 --project examples/ScopedCodec
       - name: Temporal reader runtime compatibility
         run: |
           for framework in net6.0 net8.0 net9.0 net10.0; do
@@ -50,3 +54,6 @@ jobs:
           scripts/agents/local.sh --help
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-order-check
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-process-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --combined-check

@@ -5,6 +5,7 @@ using BenchmarkDotNet.Jobs;
 using DotnetDiagnostics.BenchmarkDotNet;
 using FixSourceGenerator.Attributes;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44;
+using FixSourceGenerator.Benchmarks.Generated.Fix.V44.Runtime;
 
 namespace FixSourceGenerator.Benchmarks;
 
@@ -28,25 +29,16 @@ public class FixViewBenchmarks
     private static byte[] BuildWireMessage()
     {
         var dest = new byte[512];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteSenderCompID(Ascii("SENDER"));
-        w.WriteTargetCompID(Ascii("TARGET"));
-        w.WriteMsgSeqNum(7);
-        w.WriteSendingTime(new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc));
-        w.WriteClOrdID(Ascii("ORD-1"));
-        w.WriteSymbol(Ascii("MSFT"));
-        w.WriteSide(Side.Buy);
-        w.WriteOrderQty(100m);
-        w.WriteOrdType(OrdType.Limit);
-        w.WritePrice(101.25m);
-        w.WriteNoPartyIDs(2);
-        w.WritePartyID(Ascii("PARTY-1"));
-        w.WritePartyIDSource((char)'1');
-        w.WritePartyRole(1);
-        w.WritePartyID(Ascii("PARTY-2"));
-        w.WritePartyIDSource((char)'1');
-        w.WritePartyRole(3);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, Ascii("SENDER"), Ascii("TARGET"), 7,
+            new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), Ascii("ORD-1"));
+        var instrument = message.BeginInstrument(Ascii("MSFT"));
+        var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
+        var group = tail.WritePrice(101.25m).BeginNoPartyIDs(2);
+        group = group.BeginEntry(Ascii("PARTY-1")).WritePartyIDSource('1').WritePartyRole(1).EndEntry();
+        group = group.BeginEntry(Ascii("PARTY-2")).WritePartyIDSource('1').WritePartyRole(3).EndEntry();
+        int len = group.EndGroup().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;
@@ -76,9 +68,11 @@ public class FixViewBenchmarks
     /// <summary>Baseline: the full reader iterating the group, same access pattern as the view below.</summary>
     [Benchmark]
     [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
-    public decimal Decode_FullReader_TwoFields_PlusGroup()
+    public decimal Decode_FullReader_TwoFields_PlusGroup() => DecodeFull(Wire);
+
+    internal static decimal DecodeFull(ReadOnlySpan<byte> buffer)
     {
-        var reader = new NewOrderSingleReader(Wire);
+        var reader = new NewOrderSingleReader(buffer);
         decimal total = reader.ClOrdID.Length;
         total += reader.Price ?? 0m;
         foreach (var party in reader.NoPartyIDs)
@@ -90,17 +84,16 @@ public class FixViewBenchmarks
     }
 
     /// <summary>
-    /// [FixView] exposing the group as a typed property (issue #17), alongside the same 2 scalar
-    /// fields. Expected to be roughly on par with (not faster than) the full reader here: the
-    /// group property isn't part of the early-exit scan — it's a lazy wrapper over the whole
-    /// buffer either way, in both the view and the full reader (see FixViewEmitter.EmitGroupPropertyImpl).
-    /// This benchmark exists to confirm that claim empirically, not to show a win.
+    /// Includes the selective view's scoped group-location cost and subsequent enumeration.
+    /// Unlike the full reader, the view bounds the group before constructing its group reader.
     /// </summary>
     [Benchmark]
     [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
-    public decimal Decode_FixView_TwoFields_PlusGroup()
+    public decimal Decode_FixView_TwoFields_PlusGroup() => DecodeProjected(Wire);
+
+    internal static decimal DecodeProjected(ReadOnlySpan<byte> buffer)
     {
-        var view = new OrderRoutingWithPartiesView(Wire);
+        var view = new OrderRoutingWithPartiesView(buffer);
         decimal total = view.ClOrdID.Length;
         total += view.Price ?? 0m;
         foreach (var party in view.NoPartyIDs)

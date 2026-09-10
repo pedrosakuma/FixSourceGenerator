@@ -30,6 +30,317 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
+### Residual membership after selective readers (#33)
+
+Compared the integrated `835941c` binary-search baseline with bounded bitmap policy `7db739c`,
+without changing writer, projection, selected fields or temporal parsing. The adopted policy
+is generated once per group: keep linear lookup through 16 tags; above that, use a 32-bit-word
+bitmap only if its payload is at most **8 KiB** and no larger than the replaced sorted int
+array. Otherwise keep binary search, including sparse/high custom tags. A bitmap replaces
+the integer tag array rather than retaining both. The existing public unsorted constructor
+and nested-group/delimiter behavior are unchanged; no per-message lookup allocation is added.
+
+The residual cost is still material after projection. An alternating same-process comparison
+of separate assembly load contexts used eight 200 ms blocks per variant/case, reversing
+execution order each round after 500 ms warmup per action. It covered all seven combined
+scenarios plus X/W reader-only and slicing paths at 1/10/50 entries. Median block times:
+
+| Work, 50 entries | Binary, us | Bounded bitmap, us | Reduction |
+|------------------|-----------:|------------------:|----------:|
+| X slicing only | 12.179 | 5.978 | 51% |
+| W slicing only | 7.911 | 5.313 | 33% |
+| X projected decode/consume | 34.833 | 29.079 | 17% |
+| W projected decode/consume | 27.718 | 23.310 | 16% |
+| X in-place encode + projected decode/consume | 62.014 | 54.314 | 12% |
+| W in-place encode + projected decode/consume | 52.109 | 49.017 | 6% |
+
+Small combined medians were 1.547/1.494 us fluent/full and 1.415/1.403 us in-place/projected;
+these small differences are not a claim of improvement for tiny groups, which keep linear
+lookup. All 32 paired cases reported zero measured load-thread bytes.
+
+Separate BDN runs used two launches, three warmups and seven iterations per launch:
+
+| Combined work | Binary mean (SD), us | Bitmap mean (SD), us |
+|---------------|---------------------:|--------------------:|
+| W/50 fluent/full | 70.09 (1.865) | 70.53 (4.490) |
+| W/50 in-place/projected | 51.18 (1.187) | 47.30 (1.641) |
+| X/50 fluent/full | 88.37 (2.995) | 82.08 (3.035) |
+| X/50 in-place/projected | 82.38 (24.015), rejected as noisy | 54.69 (2.082) |
+
+The noisy binary X/50 result was repeated with two launches, five warmups and ten iterations:
+fluent/full **90.86 (1.404) us**, in-place/projected **63.20 (2.923) us**.
+The stable repeat supports roughly 13% less time for bitmap on the projected combined path;
+do not use the noisy 82.38 us baseline to inflate that estimate. W fluent/full showed no
+reliable improvement. Sequential BDN runs can drift on this shared host; paired results
+support the direction but neither experiment is a production latency guarantee.
+All these BDN cases reported no managed allocation. Host/runtime match the integration
+results below: EPYC 7763, Ubuntu 24.04, .NET 10.0.11, SDK 10.0.400, BDN 0.15.8, Release.
+
+#### Metadata and code costs, separately measured
+
+The probe explicitly initializes all 1,066 generated group types in the benchmark assembly
+(full FIX50SP2 plus mini FIX44). Only 31 groups qualify for bitmap:
+
+| Metric | Binary | Bounded bitmap |
+|--------|-------:|---------------:|
+| Retained membership arrays | 1,066 | 1,066 |
+| Retained array payload bytes | 502,428 | 309,568 |
+| Managed bytes during group type initialization | 585,720 | 376,496 |
+| X outer-group payload bytes | 16,132 | 5,392 |
+| W outer-group payload bytes | 552 | 372 |
+| Group initializer IL bytes | 25,631 | 25,607 |
+| Complete generated source bytes (2,687 files) | 31,291,055 | 30,872,843 |
+| Benchmark assembly bytes | 11,666,432 | 11,508,736 |
+
+Array payload drops **38%** across these generated groups, not across the whole application.
+Payload excludes object headers and delegates; the separate initialization allocation window
+includes runtime initialization overhead and any nested-skip delegates. Neither is a
+whole-process retained-memory measurement. W uses 32-bit words rather than the archived
+64-bit-word prototype's 376-byte payload.
+The assembly-size comparison predates fixture-adapter correction `9249509`; that correction
+adds 512 bytes to the bitmap assembly without changing the measured codec methods or metadata.
+It aligns older order/process projections with W LastUpdateTime and makes their metadata
+adapter understand either representation. W process fixtures now consume 2 + 4N temporal
+values, rather than the historical 1 + 4N.
+
+A separate JIT diagnostic (`DOTNET_TieredCompilation=0`,
+`DOTNET_JitDisasm='*FixGroupEnumerator:*'`, `--combined-check`) reported FullOpts native sizes
+for each schema runtime: constructor **273 -> 282 bytes**, `MoveNext` **418 -> 418 bytes**,
+`Contains` **118 -> 143 bytes**. This is a small native-code increase, not eliminated lookup
+cost. Those diagnostic settings were not used for timed runs and do not describe tiered-PGO
+code sizes.
+
+Adoption is based on projected/combined work and lower metadata, not slicing alone. HashSet
+was not rerun: earlier representative full-reader evidence did not justify its additional
+retained structure, and the bounded candidate already improves the relevant projected path.
+Sparse/high-tag fallback remains deliberately conservative.
+
+```bash
+dotnet run -c Release --project benchmarks/experiments/paired-load/PairedLoad.csproj -- \
+  --residual /absolute/binary/benchmark.dll /absolute/bitmap/benchmark.dll
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*CombinedCodecBenchmarks*50*' \
+  --launchCount 2 --warmupCount 3 --iterationCount 7 --buildTimeout 600
+```
+
+### Integrated encoding, projected decoding and persistent-state load (#34)
+
+This integration combines writer `e116023` and reader `f6a3e21` (local merge `589d29c`),
+plus the 64-bit writer-generation correction described below. `CombinedCodecBenchmarks`
+measures **encode -> decode -> consume** in one operation, rather than adding independent
+microbenchmark means. Both paths reuse destination and typed writer metadata, initialized
+once. Prices vary each operation; the consumed digest must match its exact expected delta.
+Setup also compares fluent/in-place frames byte-for-byte and full/projected digests.
+
+`FluentFull` uses fluent writing and full readers; `InPlaceProjected` uses optional-tail
+setters and generated projections. Both consume the same selected fields. Small is the
+FIX44 mini NewOrderSingle routing subset (ClOrdID length, Price and party roles); X/W use
+the real full FIX50SP2 schema with 1/10/50 entries. W now also consumes its required
+LastUpdateTime on both paths, so its workload differs from earlier reader-only numbers.
+This is codec work, not network transport, session management or FIXT composition.
+
+One launch, three warmups and five measured iterations per case, run serially without
+concurrent local builds or loads; EPYC 7763, Ubuntu 24.04, SDK 10.0.400, .NET 10.0.11,
+BDN 0.15.8, Release:
+
+| Scenario | Fluent/full mean (SD), us | In-place/projected mean (SD), us | Mean reduction |
+|----------|-------------------------:|--------------------------------:|---------------:|
+| Small | 1.506 (0.0225) | 1.360 (0.0123) | 10% |
+| W/1 | 3.166 (0.0143) | 2.500 (0.0466) | 21% |
+| W/10 | 15.898 (0.1346) | 11.513 (0.5422) | 28% |
+| W/50 | 70.334 (1.0591) | 50.780 (1.8006) | 28% |
+| X/1 | 2.727 (0.0626) | 2.038 (0.0476) | 25% |
+| X/10 | 18.901 (1.0400) | 13.447 (0.5733) | 29% |
+| X/50 | 91.052 (2.3129) | 61.232 (1.1134) | 33% |
+
+These are exploratory estimates with small iteration counts and BDN outlier removal.
+For example, the X/50 99.9% confidence-interval half-widths are 14.946/7.195 us.
+BDN reported 2 B/op for fluent/full X/50 and no allocation for the other cases; the source
+of that isolated small allocation is not established. All standalone warmed load windows
+below reported zero current-thread managed bytes. Do not claim universal zero allocation
+or extrapolate these ratios to arbitrary projections.
+
+#### Long-lived metadata exposed a real exhaustion bug
+
+A sustained projected X/50 run with 32-bit generations failed after **2,626,151 measured
+messages**, reaching generation **2,147,483,647**. Generation advances per field/transition,
+not just per message. Both shared state and handle generations now use `long`; overflow
+still fails closed, never resets/wraps to revive stale aliases. Boundary regressions cover
+crossing the old limit and refusing 64-bit wrap. The generated metadata layout grows;
+consumers must use typed state allocation rather than assume a fixed byte size.
+
+The corrected, uninstrumented 240-second X/50 projected run completed **3,904,768 messages**
+at **16,269.7 ops/s**, reaching generation **3,189,028,150**, beyond the old limit.
+Sampled p50/p95/p99 were **55.9/87.8/124.7 us**, with 61,012 retained samples and zero
+current-thread managed bytes during the measurement window.
+
+Separate serial 10-second load windows:
+
+| Scenario | Full ops/s | Projected ops/s | Full p50/p95/p99, us | Projected p50/p95/p99, us |
+|----------|-----------:|----------------:|--------------------:|-------------------------:|
+| Small | 649790 | 744419 | 1.4 / 2.2 / 2.7 | 1.3 / 1.8 / 2.3 |
+| X/1 | 368465 | 498373 | 2.5 / 3.8 / 4.7 | 1.9 / 2.8 / 3.5 |
+| X/10 | 56856 | 78657 | 16.2 / 24.9 / 43.8 | 11.8 / 17.7 / 33.7 |
+| X/50 | 11432 | 16918 | 80.9 / 119.4 / 155.7 | 55.4 / 83.8 / 118.6 |
+| W/1 | 319280 | 408674 | 3.0 / 4.3 / 5.3 | 2.3 / 3.2 / 4.0 |
+| W/10 | 66918 | 84848 | 13.9 / 21.3 / 39.8 | 10.8 / 16.5 / 34.3 |
+| W/50 | 14442 | 20656 | 63.8 / 98.6 / 141.0 | 44.5 / 70.4 / 104.2 |
+
+The load is single-threaded, closed-loop, warmed for one second, sampling every 64th
+operation into a bounded 65,536-sample rolling buffer. Percentiles use nearest rank and
+describe the trailing sampled window when the buffer wraps. Fixed-interval sampling can
+alias periodic behavior; these are not open-loop latency/SLA estimates. Allocation excludes
+setup, warmup, sample storage and reporting. Prices cycle through 1,024 offsets.
+The initial failing run had a separate 10-second managed sampled-thread-time trace;
+none of the performance numbers above came from that traced run.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --combined-check
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*CombinedCodecBenchmarks*' \
+  --launchCount 1 --warmupCount 3 --iterationCount 5 --buildTimeout 600
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --combined-load X50 240 projected
+```
+
+Load scenarios: `Small`, `X1`, `X10`, `X50`, `W1`, `W10`, `W50`; modes: `full`, `projected`;
+duration: 1-600 seconds. `--combined-check` is also exercised in CI. The integrated suite
+contains 262 passing cases, including full FIX44/FIX50SP2 generation and compilation under
+a 2 GiB managed-heap cap; the ordinary-consumer net6/C#11 compatibility build also passes.
+
+### Same-build writer pipeline investigation and in-place setters (#31)
+
+`WriterPipelineBenchmarks` compares identical X/W frames in one binary:
+
+- `Raw`: constant-prefix span encoding, capacity checks and envelope finalization.
+- `StateAndCounts`: also initializes the same bounded metadata and enforces generation,
+  poison, entry delimiters, expected counts and closure. It does **not** enforce all generated
+  field-order/domain/required-scope rules, so it is a diagnostic lower bound, not a replacement API.
+- `Scoped`: the generated fluent API with its complete schema checks and consuming handoffs.
+- `InPlace`: the same generated API, using `Set{Field}` for optional-only scalar tails, while
+  retaining required factories and consuming component/group transitions.
+
+The initial 1/50-entry experiment showed severe variance for X/50 in-place (42.57 us mean,
+15.26 us SD). It was not accepted as a speed estimate. A longer, serial 50-entry rerun used
+**two launches, five warmups and ten measured iterations per launch**, with no concurrent builds:
+
+| Message, 50 entries | Raw mean (SD), us | State/count mean (SD), us | Fluent mean (SD), us | In-place mean (SD), us |
+|--------------------|------------------:|-------------------------:|--------------------:|----------------------:|
+| W | 15.99 (0.204) | 20.76 (0.538) | 31.96 (0.899) | 23.37 (0.608) |
+| X | 17.05 (0.334) | 22.24 (0.426) | 38.88 (0.414) | 26.96 (0.520) |
+
+Host: EPYC 7763, Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11, BDN 0.15.8, Release.
+All four paths produce exactly equal bytes, including BodyLength and CheckSum, at 1/10/50
+entries. No warmed managed allocation was reported. State/count safety adds about 30% to raw
+encoding here; generated fluent handoffs add substantially more. In-place means are about
+**27% lower for W and 31% lower for X** than fluent, while retaining generated validation.
+This isolates API-layer overhead (calls/returns/copies), not a measured cost for each individual
+machine instruction. In-place remains 46-58% above raw; raw omits important guarantees.
+
+Small-message performance is not universally improved: the exploratory W/1 means were about
+1.97 us fluent and 1.98 us in-place, where the fixed scope-transition cost dominates. Do not
+extrapolate the 50-entry gains to every schema or frame size.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*WriterPipelineBenchmarks*50*' \
+  --launchCount 2 --warmupCount 5 --iterationCount 10 --buildTimeout 600
+```
+
+The confirmation run temporarily selected only 50-entry parameters; the checked-in benchmark
+also includes one-entry frames. The filter above selects the 50-entry cases.
+The new setters preserve net6/C#11 and the complete FIX44/FIX50SP2 2 GiB managed-heap comparison.
+
+### Before in-place setters: shared scoped writers (#31)
+
+Component/group definitions now produce shared generic templates parameterized by ordinary
+continuation marker structs. Marker-specific closure extensions preserve fluent parent returns
+without using ref structs as generic arguments or raising the net6/C#11 floor. The real full
+FIX44 and FIX50SP2 generation/compilation cases now both pass with the same **2 GiB managed
+heap limit** that rejected the initial scoped candidate.
+
+The full FIX50SP2 evidence contains 1,282 shared definition files, 1,948 shared writer ref-struct
+types and 7,461,436 bytes of shared template source. The X/W principal generated files are
+19,589/46,123 bytes; these small files must not be counted without the shared definitions and
+continuation support they use. No dictionary reduction was used.
+
+The runtime also shares cold validation/throw paths, consumes source handles by invalidating
+their generation, and validates successful mutations once rather than in each preceding guard.
+A mutation marks shared state failed and advances its generation **before** writing; only normal
+return restores active status. Thus any exception still poisons all handles, without per-field
+exception handlers blocking inlining. Invalid arguments on stale handles never poison the live owner.
+
+Latest serial measurements, using the same setup and baseline described below:
+
+| Encoding | Flat baseline, us | Initial scoped draft, us | Shared scopes mean (SD), us |
+|----------|------------------:|-------------------------:|----------------------------:|
+| Small NewOrderSingle, two parties | 0.453 | 1.017 | 0.967 (0.011) |
+| X, 10 entries | 3.282 | 8.246 | 7.654 (0.035) |
+| W, 10 entries | 3.096 | 7.508 | 6.909 (0.055) |
+| X, 50 entries | 15.829 | 39.574 | 36.089 (0.143) |
+| W, 50 entries | 15.037 | 33.724 | 30.083 (0.190) |
+
+No warmed managed allocation was reported. The latest means are lower than the initial draft,
+but short-run intervals overlap in some comparisons: this is not proof of a stable 5-11% gain.
+Encoding remains approximately **2.0-2.33x the recorded flat baseline**, so #39 remains draft
+pending the encoding-cost decision/optimization. The schema-memory blocker is resolved; the
+throughput trade-off is not. Earlier baseline numbers were not rerun in this iteration.
+
+Forcing inlining on generated optional-tail setters was also tried and rejected: its means
+were 0.971/7.994/7.147/37.445/30.942 us in table order, with no observed improvement over the
+retained version. Those extra generated annotations are not part of the candidate.
+
+### Initial scoped writer candidate (#31): historical regressions
+
+The initial candidate was **not ready for merge**. Its structural safety checks increased
+complete encoding time, and full FIX50SP2 generation/compilation has a memory regression.
+The memory finding below describes the initial draft, before shared templates.
+
+Measured serially on AMD EPYC 7763 / Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11,
+BenchmarkDotNet 0.15.8, Release; one launch, two warmups and three measured iterations.
+No implementation builds ran alongside timed workloads. The candidate includes caller-owned
+metadata initialization, required inputs, optional transitions, entry/count closure and `Finish`.
+X/W use the real, full FIX50SP2 dictionary, not a reduced synthetic schema.
+
+| Encoding | Baseline mean (SD), us | Scoped mean (SD), us | Mean ratio |
+|----------|----------------------:|--------------------:|-----------:|
+| Small NewOrderSingle, two parties | 0.453 (0.002) | 1.017 (0.025) | 2.24x |
+| X, 10 entries | 3.282 (0.023) | 8.246 (0.196) | 2.51x |
+| W, 10 entries | 3.096 (0.012) | 7.508 (0.054) | 2.43x |
+| X, 50 entries | 15.829 (0.147) | 39.574 (0.378) | 2.50x |
+| W, 50 entries | 15.037 (0.013) | 33.724 (0.792) | 2.24x |
+
+No managed allocation was reported in these warmed paths. These are short exploratory runs
+with wide 99.9% confidence intervals, not precise production latency guarantees. The ratios
+compare separately measured means; they are not paired BenchmarkDotNet baseline statistics.
+
+The baseline is `68047d0`. For a fair W comparison, its fixture additionally calls
+`writer.WriteLastUpdateTime(_expiry)` immediately after `writer.WriteSymbol("SYMBOL"u8)`.
+The original flat fixture omitted that required field; the scoped API now requires it.
+The table uses the rerun with this correction, not the original incomplete W workload.
+Baseline and candidate X/W frames were compared byte-for-byte at 1/10/50 entries, including
+BodyLength and CheckSum. Their lengths respectively are X: 214/1729/8489 and W: 234/1605/7725.
+
+Run each version from an isolated worktree containing only one matching benchmark project;
+BenchmarkDotNet's solution-root search can otherwise find other worktrees beneath `.git`.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*ReaderWriterBenchmarks.Encode_Generated' \
+    '*MarketDataWriterBenchmarks.X_ScaledAndIntegral' \
+    '*MarketDataWriterBenchmarks.W_ScaledAndIntegral' \
+  --launchCount 1 --warmupCount 2 --iterationCount 3 --buildTimeout 600
+```
+
+Under a 2 GiB managed heap limit (`DOTNET_GCHeapHardLimit=0x80000000`), the existing full-schema
+generation/compilation cases pass for both FIX44 and FIX50SP2 on the baseline. The revised
+candidate passes FIX44 but exhausts memory during Roslyn parsing for FIX50SP2. Passing without
+this limit does not close the resource regression. Optional-tail factoring alone is insufficient;
+generated sub-scope duplication and runtime transition overhead remain blockers for #31.
+
+### Historical small-message comparison
+
 Captured on: AMD EPYC 7763 (WSL/Ubuntu 24.04), .NET 9.0.14, Release, `NewOrderSingle` with one
 component + one 2-entry repeating group (see `ReaderWriterBenchmarks.cs` for the exact message
 shape).
@@ -306,7 +617,7 @@ while bounding an entry. The full dictionary contains 4,033 possible tags for X'
 entries versus 138 for W's `MDFullGrp`; these are schema possibilities, not fields present in
 each encoded entry.
 
-Generated membership arrays are now sorted at generation time. The generated-only runtime path
+At this historical baseline, membership arrays were sorted at generation time. The generated-only runtime path
 uses binary search above 16 tags, retaining linear lookup for small sets. The public four-argument
 `FixGroupEnumerator` constructor continues to support arbitrary, unsorted tag lists. Delimiters
 are still derived from schema order before sorting, and membership remains specific to each group.
@@ -392,7 +703,7 @@ HashSet consistently reduced X delimitation time versus binary search, but did n
 a consistent full-X decoding improvement. Bitmap had the lowest delimitation means for both
 groups in both passes. Full decoding improvements were much smaller, with other work remaining
 in scanning, reader construction and value conversion; bitmap did not beat HashSet on every
-full-decoding measurement. The production implementation remains binary search pending an
+full-decoding measurement. At that stage, the implementation retained binary search pending an
 adoption decision; the alternatives were measured only in isolated experimental copies.
 
 A bitmap's payload alone is 5,392 bytes for X and 376 bytes for W, versus 16,132/552 bytes for
@@ -622,3 +933,112 @@ ranges were 83.64-92.73 us versus 51.70-57.62 us for X and 68.44-71.20 us versus
 39.34-43.84 us for W. The no-temporal controls remained close. This supports the integrated
 parser improvement, but remains a shared-host paired load, not a new BenchmarkDotNet run
 or a production latency guarantee. Group-scoped projection remains a narrower prototype.
+
+### Generated entry/component projections (#32)
+
+Measured on 2026-09-09 after both implementation agents stopped building: same shared
+EPYC 7763/Ubuntu 24.04 host, SDK 10.0.400, runtime 10.0.11, BDN 0.15.8, Release.
+One launch, two warmups, three measured iterations. These are short exploratory runs,
+not release latency guarantees: the 99.9% error intervals are wide with only three samples.
+
+The full and projected methods run in the **same candidate build**, with the #30 temporal
+parser, identical X/W frame bytes and selected-field digests. This is not a before/after
+comparison against an unmodified old assembly. Envelope/network validation is not timed.
+The projections here are generated FixViews, not the earlier handwritten process prototypes.
+
+Means (sample standard deviation), microseconds per frame:
+
+| Message | Entries | Full reader | Generated projection |
+|---|---:|---:|---:|
+| X | 1 | 1.391 (0.037) | 0.893 (0.031) |
+| W | 1 | 1.497 (0.037) | 0.771 (0.037) |
+| X | 10 | 12.629 (0.750) | 7.688 (0.186) |
+| W | 10 | 8.561 (0.123) | 5.665 (0.063) |
+| X | 50 | 56.043 (1.136) | 37.759 (1.731) |
+| W | 50 | 39.326 (1.907) | 25.486 (0.351) |
+
+No managed allocation was reported by MemoryDiagnoser for these warmed paths. At 50 entries,
+the mean reductions were about 33% for X and 35% for W, subject to the uncertainty above.
+For example, the 99.9% half-widths for X/50 were 20.717 us full and 31.580 us projected;
+for W/50 they were 34.785 us and 6.396 us.
+
+The small-message two-field benchmark measured 160.5 ns (3.16 ns SD) for the full reader
+and 112.6 ns (3.03 ns SD) for FixView, with no reported allocation. Reading price/size twice
+per X entry versus caching their first conversions at the call site measured:
+
+| Entries | Repeated getters, us | Cached local conversions, us |
+|---:|---:|---:|
+| 1 | 0.569 (0.017) | 0.514 (0.003) |
+| 10 | 5.242 (0.161) | 4.405 (0.046) |
+| 50 | 27.266 (0.691) | 22.608 (0.339) |
+
+Both access cases use the same lazy generated constructor. This measures call-site caching,
+**not an alternative eagerly converting generated constructor**. It does not justify changing
+the default conversion/storage strategy for all consumers.
+
+Generated state/code inspection before helper sharing (`e8c137f`) exposed this trade-off:
+
+| Type | Instance fields | Constructor IL bytes | Declared method IL bytes |
+|---|---:|---:|---:|
+| X projection | 36 | 3,515 | 96,557 |
+| W projection | 30 | 1,225 | 1,778 |
+| X two-field projection | 7 | 2,773 | 96,006 |
+| X full entry reader | 294 | 5,780 | 6,807 |
+| W full entry reader | 264 | 5,212 | 6,008 |
+
+Field counts include the source span, not byte-sized instance-layout measurements. Method IL
+excludes constructors and nested types; none of these columns represents native/JIT code size.
+Those large X method totals included recursively generated group-boundary helpers duplicated
+per view. Fewer cached fields do **not** imply less generated code.
+
+### Shared helper update (#32)
+
+Views now call one `Runtime.FixViewGroupSkipHelpers` container per runtime namespace. Helpers
+are keyed by resolved group-definition identity, not short names, and retain contextual boundary
+arguments. Using the runtime namespace also avoids colliding with FIX message/component names.
+
+| Type | Previous declared method IL | Shared-helper version |
+|------|----------------------------:|----------------------:|
+| X projection | 96,557 bytes | 665 bytes |
+| W projection | 1,778 bytes | 548 bytes |
+| X two-field projection | 96,006 bytes | 114 bytes |
+
+Field counts and constructor IL are unchanged. **The helper code has not disappeared:** the
+fixture's schema-wide container has 339 methods / **104,814 IL bytes**, shared across its
+header and entry projections. Ordinary reader boundary helpers still have their own schema-level
+copy; the two incremental pipelines have not been combined. These are IL sizes, not native code.
+
+A serial rerun on the same host/runtime and short-run settings above produced:
+
+| Message | Entries | Full decode mean (SD), us | Projected mean (SD), us |
+|---------|--------:|--------------------------:|-----------------------:|
+| X | 1 | 1.318 (0.023) | 0.828 (0.021) |
+| W | 1 | 1.193 (0.024) | 0.760 (0.001) |
+| X | 10 | 11.285 (0.340) | 6.937 (0.108) |
+| W | 10 | 8.332 (0.326) | 5.346 (0.072) |
+| X | 50 | 54.333 (0.133) | 33.755 (0.082) |
+| W | 50 | 37.962 (0.862) | 24.737 (0.701) |
+
+Digests agree and no warmed managed allocation was reported. Projected means remain below full
+decode for these fixtures; three measured iterations and wide confidence intervals do not
+establish precise production speedups or an independent speedup caused by helper sharing.
+
+Run from the relevant worktree root, not its parent repository containing other worktrees
+(otherwise BDN can reject multiple identically named project files):
+
+```bash
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-check
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-code-size
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*MarketDataReaderBenchmarks.DecodeX' '*MarketDataReaderBenchmarks.DecodeXProjected' \
+           '*MarketDataReaderBenchmarks.DecodeW' '*MarketDataReaderBenchmarks.DecodeWProjected' \
+  --warmupCount 2 --iterationCount 3 --launchCount 1 --buildTimeout 300
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*MarketDataReaderBenchmarks.DecodeXProjectedRepeatedGetters' \
+           '*MarketDataReaderBenchmarks.DecodeXProjectedCachedConversions' \
+           '*FixViewBenchmarks.Decode_FullReader_TwoFields' '*FixViewBenchmarks.Decode_FixView_TwoFields' \
+  --warmupCount 2 --iterationCount 3 --launchCount 1 --buildTimeout 300
+```
+
+Build first after source changes. Confirm the report contains actual results: BDN can exit
+successfully after a boilerplate build failure and report `NA` with zero benchmarks executed.

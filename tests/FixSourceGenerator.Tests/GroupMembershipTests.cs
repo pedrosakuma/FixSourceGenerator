@@ -41,6 +41,28 @@ public class GroupMembershipTests
                 }
                 return entries.ToArray();
             }
+
+            public static string[] SliceBitmap(byte[] frame, int[] tags)
+            {
+                var bits = new int[tags.Length == 0 ? 0 : (tags[tags.Length - 1] >> 5) + 1];
+                foreach (int tag in tags)
+                    bits[tag >> 5] |= 1 << (tag & 31);
+                var iterator = new FixGroupEnumerator(frame, 500, 9000, bits,
+                    sortedEntryTags: true, bitmapEntryTags: true);
+                var entries = new List<string>();
+                while (iterator.MoveNext())
+                    entries.Add(Encoding.ASCII.GetString(iterator.Current).Replace('\x01', '|'));
+                return entries.ToArray();
+            }
+
+            public static string[] SliceGenerated(byte[] frame)
+            {
+                var iterator = new LargeMessageReader(frame).NoEntries.GetEnumerator();
+                var entries = new List<string>();
+                while (iterator.MoveNext())
+                    entries.Add(Encoding.ASCII.GetString(iterator.CurrentSpan).Replace('\x01', '|'));
+                return entries.ToArray();
+            }
         }
         """;
 
@@ -51,7 +73,7 @@ public class GroupMembershipTests
             .GetType("GroupDriver")!;
     });
 
-    private static FixDictionary Dictionary()
+    private static FixDictionary Dictionary(bool bitmap = false)
     {
         static FixFieldDef Field(int tag, string name, string type = "INT")
             => new(tag, name, type, new List<FixValueDef>());
@@ -68,10 +90,13 @@ public class GroupMembershipTests
         };
         for (int tag = 1060; tag > 1000; tag -= 2)
             entries.Add(new FixFieldRef(Field(tag, "Value" + tag), required: false));
+        if (bitmap)
+            for (int tag = 2000; tag < 2400; tag++)
+                entries.Add(new FixFieldRef(Field(tag, "Value" + tag), required: false));
         entries.Add(new FixGroupRef("NoNested", Field(9100, "NoNested", "NUMINGROUP"),
             new List<FixEntry>
             {
-                new FixFieldRef(Field(9101, "NestedID", "STRING"), required: true),
+                new FixFieldRef(Field(bitmap ? 9000 : 9101, "NestedID", "STRING"), required: true),
             }, required: false));
         var group = new FixGroupRef("NoEntries", Field(500, "NoEntries", "NUMINGROUP"),
             entries, required: false);
@@ -110,6 +135,8 @@ public class GroupMembershipTests
             string frame = "500=3|" + first + second + $"{unknown}=outside|9000=C|";
             Assert.Equal(new[] { first, second }, Slice(frame, tags, sorted: true));
             Assert.Equal(new[] { first, second }, Slice(frame, unsorted, sorted: false));
+            Assert.Equal(new[] { first, second }, (string[])DriverType.Value.GetMethod("SliceBitmap")!
+                .Invoke(null, new object[] { Frame(frame), tags })!);
         }
         Assert.Equal(new[] { first, second }, Slice("500=2|" + first + second, tags, sorted: true));
         Assert.Equal(new[] { first }, Slice("500=1|" + first + second, tags, sorted: true));
@@ -139,5 +166,60 @@ public class GroupMembershipTests
             + "9000=B|1000=2|1062=63|9100=1|9101=N3|999=outside|9000=C|");
         var result = (string[])DriverType.Value.GetMethod("Read")!.Invoke(null, new object[] { frame })!;
         Assert.Equal(new[] { "A:1:62:N1:N2", "B:2:63:N3" }, result);
+    }
+
+    [Theory]
+    [InlineData(0, 1, false)]
+    [InlineData(16, 1, false)]
+    [InlineData(17, 1, true)]
+    [InlineData(64, 31, true)]
+    [InlineData(17, 10000, false)]
+    [InlineData(2048, 63488, true)]
+    [InlineData(2049, 63488, false)]
+    [InlineData(17, int.MaxValue - 16, false)]
+    public void GeneratedMembership_UsesBoundedBitmapOrArray(int count, int first, bool bitmap)
+    {
+        var fields = Enumerable.Range(first, count).Select(tag => (FixEntry)new FixFieldRef(
+            new FixFieldDef(tag, "Field" + tag, "INT", new List<FixValueDef>()), required: false)).ToList();
+        var group = new FixGroupRef("NoEntries",
+            new FixFieldDef(100, "NoEntries", "NUMINGROUP", new List<FixValueDef>()), fields, required: false);
+        var dictionary = new FixDictionary("FIX", 4, 4, 0, new List<FixEntry>(), new List<FixEntry>(),
+            new List<FixMessageDef> { new("BitmapMessage", "U2", "app", new List<FixEntry> { group }) },
+            new Dictionary<string, FixComponentDef>(), new Dictionary<string, FixFieldDef>(),
+            new Dictionary<int, FixFieldDef>());
+        var files = TestSupport.Generate(dictionary, out _);
+        string source = string.Join("\n", files.Select(file => file.content));
+        Assert.Equal(bitmap, source.Contains("EntryTagBits = new int[]"));
+        Assert.Equal(!bitmap, source.Contains("EntryTags = new int[]"));
+    }
+
+    [Fact]
+    public void BitmapPreservesWordBoundariesAndRejectsHighUnknownTags()
+    {
+        int[] tags = { 0, 31, 32, 63, 64, 65, 127 };
+        string fields = string.Concat(tags.Select(tag => $"{tag}=1|"));
+        string first = "9000=A|" + fields;
+        foreach (int unknown in new[] { 1, 30, 33, 62, 66, 128, int.MaxValue })
+        {
+            var frame = Frame("500=2|" + first + $"{unknown}=outside|9000=B|");
+            Assert.Equal(new[] { first }, (string[])DriverType.Value.GetMethod("SliceBitmap")!
+                .Invoke(null, new object[] { frame, tags })!);
+        }
+    }
+
+    [Fact]
+    public void GeneratedBitmap_PreservesNestedGroupsSharingTheParentDelimiter()
+    {
+        var files = TestSupport.Generate(Dictionary(bitmap: true), out _);
+        Assert.Contains(files, file => file.content.Contains("bitmapEntryTags: true"));
+        var type = TestSupport.EmitAndLoad(files.Select(file => file.content).Append(Driver)).GetType("GroupDriver")!;
+        var frame = Frame("500=3|9000=A|1062=62|1000=1|9100=2|9000=N1|9000=N2|"
+            + "9000=B|1000=2|1062=63|9100=1|9000=N3|999=outside|9000=C|");
+        var result = (string[])type.GetMethod("SliceGenerated")!.Invoke(null, new object[] { frame })!;
+        Assert.Equal(new[]
+        {
+            "9000=A|1062=62|1000=1|9100=2|9000=N1|9000=N2|",
+            "9000=B|1000=2|1062=63|9100=1|9000=N3|",
+        }, result);
     }
 }

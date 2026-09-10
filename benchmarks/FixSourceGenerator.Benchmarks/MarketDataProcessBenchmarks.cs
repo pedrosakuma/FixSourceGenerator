@@ -12,6 +12,7 @@ public class MarketDataProcessBenchmarks
 {
     private byte[] _frame = null!;
     private int[] _entryTags = null!;
+    private bool _bitmapEntryTags;
     private MarketDataReaderBenchmarks _reader = null!;
     private bool _incremental;
     private (int Tag, ReadOnlyMemory<byte> Value)[] _temporal = null!;
@@ -43,15 +44,18 @@ public class MarketDataProcessBenchmarks
         Type group = _incremental
             ? typeof(MDIncGrpReader.NoMDEntriesGroupReader)
             : typeof(MDFullGrpReader.NoMDEntriesGroupReader);
-        _entryTags = (int[])group.GetField("EntryTags", BindingFlags.Static | BindingFlags.NonPublic)!
-            .GetValue(null)!;
+        const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
+        var membership = group.GetField("EntryTagBits", flags) ?? group.GetField("EntryTags", flags)
+            ?? throw new InvalidOperationException("Generated group membership metadata is missing.");
+        _entryTags = (int[])membership.GetValue(null)!;
+        _bitmapEntryTags = membership.Name == "EntryTagBits";
 
         var temporal = new List<(int, ReadOnlyMemory<byte>)>();
         var nonTemporal = new List<(int, ReadOnlyMemory<byte>)>();
         int position = 0;
         while (FixSpanReader.TryReadField(_frame, position, out int tag, out int start, out int length, out int next))
         {
-            if (tag is 75 or 126 or 272 or 273 or 432)
+            if (tag is 75 or 126 or 272 or 273 or 432 || (!_incremental && tag == 779))
                 temporal.Add((tag, _frame.AsMemory(start, length)));
             else if (tag is 37 or 55 or 268 or 269 or 270 or 271 or 278 or 279 or 346)
                 nonTemporal.Add((tag, _frame.AsMemory(start, length)));
@@ -67,7 +71,7 @@ public class MarketDataProcessBenchmarks
             || ProjectFrameNoTemporal() != withoutTemporal
             || ParseNonTemporalLocated() != withoutTemporal)
             throw new InvalidOperationException($"Process projections disagree: {Message}, {Order}, {Entries} entries.");
-        if (_temporal.Length != 1 + 4 * Entries)
+        if (_temporal.Length != (_incremental ? 1 : 2) + 4 * Entries)
             throw new InvalidOperationException("Unexpected number of temporal conversions.");
     }
 
@@ -102,7 +106,7 @@ public class MarketDataProcessBenchmarks
             {
                 75 or 272 or 432 => FixSpanReader.ParseDateOnly(value).DayNumber,
                 273 => FixSpanReader.ParseTimeOnly(value).Ticks,
-                126 => FixSpanReader.ParseDateTime(value).Ticks,
+                126 or 779 => FixSpanReader.ParseDateTime(value).Ticks,
                 _ => throw new InvalidOperationException("Unexpected temporal field."),
             };
         }
@@ -140,7 +144,7 @@ public class MarketDataProcessBenchmarks
         else
         {
             var reader = new MarketDataSnapshotFullRefreshReader(_frame);
-            if (includeTemporal) total += reader.TradeDate!.Value.DayNumber;
+            if (includeTemporal) total += reader.TradeDate!.Value.DayNumber + (decimal)reader.LastUpdateTime.Ticks;
             if (!reader.Instrument.TryGetSymbol(out var symbol))
                 throw new InvalidOperationException("Symbol missing.");
             total += symbol.Length + symbol[0];
@@ -148,7 +152,7 @@ public class MarketDataProcessBenchmarks
         }
         // Same generated metadata and runtime boundary algorithm, but project within each entry.
         var iterator = new FixGroupEnumerator(_frame, 268, _incremental ? 279 : 269,
-            _entryTags, sortedEntryTags: true);
+            _entryTags, sortedEntryTags: true, bitmapEntryTags: _bitmapEntryTags);
         while (iterator.MoveNext())
             total += MarketDataOrderBenchmarks.ProjectSinglePass(iterator.Current, _incremental,
                 checkEntryCount: false, includeTemporal: includeTemporal);

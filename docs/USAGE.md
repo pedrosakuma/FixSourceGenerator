@@ -8,25 +8,50 @@ is the practical "how do I use it" companion.
 
 ## 1. Installing
 
-Add the package to the project that should contain the generated FIX types, and reference your
-schema XML file(s) as `AdditionalFiles` (not `Compile` — the generator reads them as text, they
-are not C# source):
+**This guide describes the unreleased scoped API, not the writer API in package 0.1.0.**
+See [MIGRATION.md](MIGRATION.md) before upgrading. Release/version selection is separate from
+this source integration.
+
+The runnable [ScopedCodec example](../examples/ScopedCodec) references the current generator
+as an analyzer and reuses the checked-in mini dictionary:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="FixSourceGenerator" Version="0.1.0" PrivateAssets="all" />
-  <AdditionalFiles Include="Schemas\FIX44.xml" />
+  <ProjectReference Include="../../src/FixSourceGenerator/FixSourceGenerator.csproj"
+                    OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  <AdditionalFiles Include="../../tests/FixSourceGenerator.Tests/TestData/FIX44-mini.xml" />
+  <CompilerVisibleProperty Include="FixGeneratorNamespace" />
 </ItemGroup>
 ```
 
-`PrivateAssets="all"` is recommended (standard for source generators/analyzers) so the generator
-itself isn't exposed as a dependency of your published package.
+Paths above are relative to the example project. For package consumers, use `PrivateAssets="all"`
+and pin a released version containing the desired API. Keep schemas in `AdditionalFiles`, not
+`Compile`. Package `buildTransitive` wiring exposes `FixGeneratorNamespace` automatically;
+a source `ProjectReference` requires the `CompilerVisibleProperty` shown above.
+
+From the repository root:
+
+```bash
+dotnet restore examples/ScopedCodec --source https://api.nuget.org/v3/index.json
+dotnet run --no-restore -c Release -f net6.0 --project examples/ScopedCodec
+dotnet run --no-restore -c Release -f net9.0 --project examples/ScopedCodec
+```
+
+The example uses only public NuGet packages; the explicit restore source avoids the optional
+`local-packages` diagnostics feed used by the full solution's benchmarks.
+
+Both runs encode and consume absent, zero and nonzero prices with reused writer metadata and
+stack-based identifiers; the net9 run also exercises message and qualified-entry projections.
+The SDK and target runtimes must be installed. .NET 6 is a compatibility floor, not a
+recommendation to deploy an out-of-support runtime.
 
 The generator targets consuming code at **.NET 6+ with C# 11+** (it emits `DateOnly`/`TimeOnly`
 for FIX date/time fields, `u8` string literals, and `scoped` input spans). When targeting .NET 6,
 use a compiler supporting C# 11 and set `<LangVersion>11</LangVersion>`.
 The generator's own `netstandard2.0`
 target is only a Roslyn hosting requirement and has no bearing on what TFM your project uses.
+Opting into `[FixView]` requires **net9+/C#13** for partial properties; ordinary readers/writers
+do not acquire that requirement.
 
 ## 2. Namespace
 
@@ -51,8 +76,10 @@ To pin the namespace explicitly instead of relying on `RootNamespace`:
 
 ## 3. Worked example: decoding
 
-Given a `NewOrderSingle` (`MsgType=D`) message that includes the `Instrument` component and a
-`NoAllocs` repeating group, the generator produces (abbreviated):
+The examples below use [FIX44-mini.xml](../tests/FixSourceGenerator.Tests/TestData/FIX44-mini.xml),
+not the full FIX44 dictionary: `NewOrderSingle` (`MsgType=D`) has required header inputs, an
+`Instrument` component and a `NoPartyIDs` group. Constructors and transitions vary with your
+actual dictionary. The reader includes (abbreviated):
 
 ```csharp
 namespace Acme.Fix.V44;
@@ -61,12 +88,12 @@ public readonly ref struct NewOrderSingleReader
 {
     public NewOrderSingleReader(ReadOnlySpan<byte> buffer);
 
-    public ReadOnlySpan<byte> ClOrdID { get; }          // required STRING -> non-empty span
+    public ReadOnlySpan<byte> ClOrdID { get; }          // required STRING -> span
     public Side Side { get; }                            // required CHAR with <value> -> enum
     public decimal OrderQty { get; }                      // required QTY -> decimal
     public decimal? Price { get; }                        // optional PRICE -> decimal?
     public InstrumentReader Instrument { get; }            // component -> nested reader, not flattened
-    public NoAllocsGroupReader NoAllocs { get; }           // group -> enumerable sub-reader
+    public NoPartyIDsGroupReader NoPartyIDs { get; }        // group -> enumerable sub-reader
 }
 ```
 
@@ -91,14 +118,6 @@ if (order.TryGetSideStrict(out var side))
     Console.WriteLine($"Known side: {side}");
 }
 
-// MULTIPLEVALUESTRING/MULTIPLECHARVALUE/MULTIPLESTRINGVALUE: space-delimited token list.
-// The raw span is still available (order.ExecInst / TryGetExecInst), and {Field}Values
-// gives a forward-only, allocation-free enumerator over each token.
-foreach (var token in order.ExecInstValues)
-{
-    Console.WriteLine(Encoding.ASCII.GetString(token));
-}
-
 // Optional value-type field: T? pattern, no allocation.
 if (order.Price is { } price)
 {
@@ -113,45 +132,73 @@ if (order.Instrument.TryGetSecurityID(out var securityId))
 }
 
 // Groups are enumerated directly over the buffer — never materialized into a List<T>.
-foreach (var allocation in order.NoAllocs)
+foreach (var party in order.NoPartyIDs)
 {
-    Console.WriteLine($"{Encoding.ASCII.GetString(allocation.AllocAccount)}: {allocation.AllocQty}");
-
-    // Groups can nest; inner groups are enumerated the same way.
-    foreach (var nested in allocation.NoNested)
-    {
-        Console.WriteLine(Encoding.ASCII.GetString(nested.NestedPartyID));
-    }
+    Console.WriteLine($"{Encoding.ASCII.GetString(party.PartyID)}: {party.PartyRole}");
 }
 ```
+
+Readers are accessors, not complete FIX validators. Requiredness in XML does not prove that
+an arbitrary received frame contains a valid value. Optional span `TryGet` distinguishes
+absence from an explicitly empty wire value; generated writers reject explicit empty text.
+Nested groups, when present in the dictionary, are enumerated through their entry readers.
 
 ## 4. Worked example: encoding
 
 ```csharp
 using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
 Span<byte> destination = stackalloc byte[512];
-var writer = new NewOrderSingleWriter(destination); // writes BeginString/MsgType immediately
-
-writer.WriteClOrdID("ORD-1"u8);
-writer.WriteSide(Side.Buy);
-writer.WriteOrderQty(100m);
-writer.WriteOrdType(OrdType.Limit);
-writer.WritePrice(101.25m);
-writer.WriteSymbol("MSFT"u8);        // Instrument component fields are flattened onto the writer
-writer.WriteNoAllocs(1);              // group counter is written explicitly (see note below)
-writer.WriteAllocAccount("ACC-1"u8);
-writer.WriteAllocQty(100m);
-
-int messageLength = writer.Finish(); // backpatches BodyLength (tag 9) and CheckSum (tag 10)
+Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+NewOrderSingleWriter.InitializeState(state);
+var message = new NewOrderSingleWriter(destination, state, "SENDER"u8, "TARGET"u8, 7,
+    new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), "ORD-1"u8);
+var instrument = message.BeginInstrument("MSFT"u8);
+var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
+var group = tail.WritePrice(101.25m).BeginNoPartyIDs(1);
+group = group.BeginEntry("PARTY-1"u8).WritePartyIDSource('D').WritePartyRole(1).EndEntry();
+int messageLength = group.EndGroup().Finish();
 SendOverSocket(destination.Slice(0, messageLength));
 ```
+
+Required scalar runs are constructor or scope-transition arguments. Optional fields advance the
+phase through either `Write{Field}` or `Skip{Field}`. Components use `Begin`/`End`; groups use an
+upfront expected count, `BeginEntry`/`EndEntry`, then `EndGroup`. Only completed entries count.
+The typed state span is bounded by maximum group nesting, must not overlap the destination, and
+must remain alive and exclusive until completion. `InitializeState` is idempotent after completion
+but rejects live ownership; it never resets the generation.
+Generations use a signed 64-bit counter because each field mutation or ownership transfer
+advances it, not just each message. Exhaustion still fails closed without wrapping or reviving
+stale handles. This changes the generated metadata layout; allocate typed `FixWriterState`
+elements using `RequiredStateLength`, never a hard-coded byte size.
+
+### In-place writes in optional-only tails
+
+Once all remaining fields/scopes are optional, scalar fields also expose `void Set{Field}(...)`.
+For example, instead of the fluent optional-field portion above:
+
+```csharp
+var tail = instrument.EndInstrument(Side.Buy, 100m, OrdType.Limit);
+tail.SetPrice(101.25m);
+int length = tail.SkipNoPartyIDs().Finish();
+```
+
+`Set` updates the current handle in place; copies taken before it become stale. `Write`, `Skip`
+and scope transitions still consume their source and require using the returned handle.
+Both forms share validation, schema-order checks, poisoning and immediate copying of scoped
+span inputs. Numeric `Set` methods have the same decimal, integral and scaled overloads as `Write`.
+Missing optional fields remain omitted; zero/false are explicit values, not absence sentinels.
+
+`Set` is not generated for required inputs or phases that must advance past required fields or
+scopes. Use constructors/factories and fluent transitions there. In-place setters are useful
+in entry loops, but do not guarantee a speedup for small frames dominated by scope transitions.
 
 ### Destination capacity and failures
 
 The constructor, field setters (including group counters), and `Finish()` throw
 `ArgumentException` with `ParamName == "destination"` when the caller's buffer is too small.
-After a failed operation, the writer is **invalid**: subsequent writes, `BeginMessage()`, and
+After a failed mutation, the writer owner is **invalid**: subsequent writes, transitions and
 `Finish()` throw `InvalidOperationException`. Discard the partial contents and construct a
 new writer over a sufficiently large buffer; never send a buffer from a failed write.
 Writes are not transactional: a failed field may already have changed bytes or the cursor.
@@ -161,42 +208,38 @@ changing the frame.
 Capacity must accommodate the intermediate six-digit BodyLength placeholder, not just the
 final frame size. `Finish()` removes unused placeholder digits (or expands beyond six digits),
 then appends the seven-byte `10=ddd<SOH>` field. The library does not rent, grow, or own buffers,
-and successful writes remain allocation-free.
+and it does not allocate a managed owner per message. Caller buffer/state allocation and
+generated type initialization are separate from warmed encoding costs.
 
 ### Stack-based identifiers
 
-Byte-span setters and the runtime's `WriteField` / `BeginMessage` use
+Byte-span inputs and the runtime's `WriteField` / `BeginMessage` use
 `scoped ReadOnlySpan<byte>` for inputs: bytes are copied immediately, never retained. This also
-works from helpers receiving the writer by reference, including flattened group setters:
+works across generated scope transitions:
 
 ```csharp
 using System;
 using System.Buffers.Text;
 using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
-static int Encode(Span<byte> destination, long orderId, long accountId)
+static int Encode(Span<byte> destination, long orderId, long partyId)
 {
-    var writer = new NewOrderSingleWriter(destination);
+    Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+    NewOrderSingleWriter.InitializeState(state);
     Span<byte> scratch = stackalloc byte[20]; // sufficient even for long.MinValue
     if (!Utf8Formatter.TryFormat(orderId, scratch, out int written))
         throw new InvalidOperationException("Order ID formatting failed.");
-    writer.WriteClOrdID(scratch[..written]);
-    writer.WriteSide(Side.Buy);
-    writer.WriteOrderQty(100m);
-    writer.WriteSymbol("MSFT"u8);
-    WriteAllocation(ref writer, accountId);
-    return writer.Finish();
-}
-
-static void WriteAllocation(ref NewOrderSingleWriter writer, long accountId)
-{
-    Span<byte> scratch = stackalloc byte[20];
-    if (!Utf8Formatter.TryFormat(accountId, scratch, out int written))
-        throw new InvalidOperationException("Account ID formatting failed.");
-    writer.WriteNoAllocs(1);
-    writer.WriteAllocAccount(scratch[..written]);
-    writer.WriteAllocQty(100m);
+    var message = new NewOrderSingleWriter(destination, state, "SENDER"u8, "TARGET"u8, 7,
+        new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), scratch[..written]);
+    var instrument = message.BeginInstrument("MSFT"u8);
+    var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
+    if (!Utf8Formatter.TryFormat(partyId, scratch, out int partyWritten))
+        throw new InvalidOperationException("Party ID formatting failed.");
+    var group = tail.SkipPrice().BeginNoPartyIDs(1);
+    group = group.BeginEntry(scratch[..partyWritten]).EndEntry();
     scratch.Clear(); // does not change bytes already copied into the destination
+    return group.EndGroup().Finish();
 }
 ```
 
@@ -205,15 +248,19 @@ which reference their original input, keep their existing lifetime contracts.
 
 ### Integral and scaled numeric values
 
-For `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, and `PERCENTAGE`, generated writers expose
-three overloads. Readers still return `decimal` / `decimal?` and the original decimal setter
-is unchanged:
+For optional `FLOAT`, `PRICE`, `PRICEOFFSET`, `QTY`, `AMT`, and `PERCENTAGE`, generated writers
+expose decimal, integral and scaled overloads. Required numeric inputs use the allocation-free
+`FixDecimal` carrier, with implicit conversions from `decimal`/`long` and
+`FixDecimal.FromScaled(mantissa, scale)`. Readers still return `decimal` / `decimal?`:
 
 ```csharp
-writer.WritePrice(123.4500m);     // existing decimal API: 44=123.4500
-writer.WritePrice(1234500L, 4);   // mantissa * 10^-scale: 44=123.4500
-writer.WriteOrderQty(1000L);     // integral quantity, without conversion to decimal
+tail.SetPrice(1234500L, 4);       // mantissa * 10^-scale: 44=123.4500
 ```
+
+For that same field, `tail.SetPrice(123.4500m)` or `tail.SetPrice(123L)` are alternatives,
+not additional calls on the same owner: duplicate writes are rejected. Required quantity is
+supplied to `EndInstrument`, for example `FixDecimal.FromScaled(10000, 2)` for `100.00`.
+With fluent `WritePrice`, retain its returned handle instead of continuing to use the source.
 
 The scaled overload accepts a signed `long` mantissa and a scale from **0 through 18**
 (inclusive). It preserves exactly that many fractional digits, including trailing zeros:
@@ -246,13 +293,11 @@ explicitly before calling the setter if needed). The reader's UTC parsing behavi
 unchanged. TZ types continue to use the same mapped format; this update does not add offsets
 or change precision.
 
-> **Note on the writer and groups (v1 pragmatic decision):** unlike the reader, which exposes
-> components/groups as nested sub-readers, the *writer* flattens component and group fields
-> into `Write{Field}` methods on the message writer, in wire-declaration order (see
-> `docs/CONTRACT.md`, `WriterEmitter` remarks). You write the group counter field explicitly
-> (`WriteNoAllocs(1)` above) before writing that many repetitions of the group's fields — the
-> writer does not automatically count/backpatch group repetitions in v1. This is a documented
-> fast-follow item, not a limitation you need to work around beyond writing the count yourself.
+> **Note on scoped writers and groups:** generated writers expose message, component, group, and
+> entry scopes. Supply required scalar values when entering the phase that owns them, explicitly
+> write or skip optional members in schema order, and close each scope. Start a group with
+> `Begin{Group}(expectedCount)`; the runtime rejects excess entries immediately and rejects a
+> short count at `EndGroup()`. Automatic group-count backpatching is not currently generated.
 
 ## 5. Diagnostics
 
@@ -313,19 +358,42 @@ matches a **group** instead of a scalar field must be typed exactly `{Group}Grou
 nullable/span variants, since a group always "exists" as a reader (`Count` is simply `0` if
 absent). A mismatch is reported as `FIX014` at build time — no `dynamic`, no runtime cast failures.
 
-Groups exposed this way don't participate in the early-exit scan: the property just wraps the
-whole buffer (`new NoPartyIDsGroupReader(_buffer)`), exactly like the full reader does, because
-`{Group}GroupReader` already finds its own counter/entries lazily on access. Fields *inside* a
-group still can't be selected individually — there's no single scalar value to expose for a 0..N
-repetition; declare a second `[FixView]` over the group's own generated entry type if you need
-selective projection there too.
+Projected groups participate in scoped location: the view records their bounded region and
+wraps that slice, not the entire message. Nested counters/delimiters are skipped according to
+schema topology. Fields inside a 0..N repetition are not message scalars; use a qualified entry
+view and feed it `CurrentSpan`:
+
+```csharp
+[FixView("NewOrderSingle.NoPartyIDs")]
+public readonly ref partial struct PartyView
+{
+    public partial ReadOnlySpan<byte> PartyID { get; }
+    public partial int? PartyRole { get; }
+}
+
+// In a method, while the original frame is still valid:
+var iterator = view.NoPartyIDs.GetEnumerator();
+while (iterator.MoveNext())
+{
+    var party = new PartyView(iterator.CurrentSpan);
+    Console.WriteLine(party.PartyRole);
+}
+```
+
+`[FixView("Instrument")]` targets a component. Qualify an ambiguous component/group with its
+message path; `FIX016` rejects ambiguous short names. Descendants of optional components
+require nullable value properties even when the field itself is required inside that component.
+Views choose the first scalar occurrence within the applicable scope; they are not strict
+duplicate-field validators. Neither views nor their spans may outlive or survive reuse of the
+input buffer. Copy selected values explicitly if they must be retained.
 
 **Requirements:**
 - The struct must be declared `partial` **and** `ref struct` (`FIX011`) — the generated
   implementation holds a `ReadOnlySpan<byte>` field internally.
-- **Requires the consuming project to target C# 13 / a net9+-era SDK**, since partial properties
+- **Requires the consuming project to target net9+ / C# 13**, since partial properties
   are a C# 13 feature. This is stricter than the rest of the generator (readers/writers only need
-  net6+, see §2) — if you can't upgrade, use the full message reader instead.
+  net6+, see §1) — if you can't upgrade, use the full message reader instead.
+
 | ID | Meaning |
 |---|---|
 | FIX010 | `[FixView("X")]`'s message name doesn't match any loaded message. |
@@ -334,6 +402,7 @@ selective projection there too.
 | FIX013 | A `[FixField("X")]` override references a field or group that doesn't exist on the message. |
 | FIX014 | The property's declared type isn't compatible with the matched field's or group's type. |
 | FIX015 | Two or more properties target the same field or group. |
+| FIX016 | A short target name matches more than one component/group scope; qualify its path. |
 
 See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations).
 
@@ -388,8 +457,8 @@ Beyond parsing/compiling a real dictionary (see the conformance tests in
 [#9](https://github.com/pedrosakuma/FixSourceGenerator/issues/9) tracks cross-conformance testing
 against [QuickFIX/n](https://github.com/connamara/quickfixn) — the mature, widely deployed .NET
 FIX engine, which consumes the same DataDictionary XML format and generates its own message
-classes via its `DDTool`. The plan is to build/decode the same logical message with both
-implementations and assert the encoded bytes (or decoded field values) match, as an independent
-sanity check beyond this project's own unit and conformance tests.
+classes via its `DDTool`. `QuickFixNConformanceTests` exercise generated frames against its
+dictionary and decoder, independently of this project's reader. This includes required fields,
+group ordering and entry delimiters; `RoundTripTests` additionally exercise local encode/decode.
 
 See [`CHANGELOG.md`](../CHANGELOG.md) for the release history of this generator itself.

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using FixSourceGenerator.Schema;
 
@@ -370,12 +371,39 @@ namespace FixSourceGenerator.Generators
             int delimiterTag = FixEntryHelpers.GetDelimiterTag(groupRef.Entries);
             var entryTags = new List<int>(FixEntryHelpers.FlattenEntryTags(groupRef.Entries));
             entryTags.Sort();
+            int[]? entryTagBits = CreateEntryTagBitmap(entryTags);
             string r = $"{_runtimeNs}.FixSpanReader";
+            var nestedGroups = new List<FixGroupRef>();
+            GroupScopeEmitter.CollectMembers(groupRef.Entries, nestedGroups, new HashSet<int>());
+            bool needsNestedBoundaries = nestedGroups.Any(group =>
+                group.CounterField.Number == delimiterTag ||
+                FixEntryHelpers.FlattenEntryTags(group.Entries).Contains(delimiterTag));
 
             w.Open($"public readonly ref struct {groupReaderType}");
             w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
             w.Line();
-            w.Line($"private static readonly int[] EntryTags = new int[] {{ {Join(entryTags)} }};");
+            string membership = entryTagBits == null ? "EntryTags" : "EntryTagBits";
+            w.Line($"private static readonly int[] {membership} = new int[] {{ {Join(entryTagBits ?? (IReadOnlyList<int>)entryTags)} }};");
+            if (needsNestedBoundaries)
+            {
+                var helperIds = new Dictionary<FixGroupRef, string>();
+                GroupScopeEmitter.AssignIds(nestedGroups, helperIds);
+                w.Line($"private static readonly {_runtimeNs}.FixNestedGroupSkipper NestedGroupSkipper = SkipNestedGroup;");
+                w.Open("private static int SkipNestedGroup(global::System.ReadOnlySpan<byte> buffer, int tag, int valueStart, int valueLength, int next, out int end)");
+                w.Line("end = next;");
+                foreach (var group in nestedGroups)
+                {
+                    w.Open($"if (tag == {group.CounterField.Number})");
+                    string allowTrailing = FixEntryHelpers.GetDelimiterTag(group.Entries) == delimiterTag ? "true" : "false";
+                    w.Line($"return {r}.TryParseInt(buffer.Slice(valueStart, valueLength), out int count) && TrySkip{helperIds[group]}(buffer, next, count, out end, allowTrailingDelimiter: {allowTrailing}) ? 1 : -1;");
+                    w.Close();
+                }
+                w.Line("return 0;");
+                w.Close();
+                var emitted = new HashSet<FixGroupRef>();
+                foreach (var group in nestedGroups)
+                    GroupScopeEmitter.EmitSkipHelper(w, _runtimeNs, group, helperIds, emitted);
+            }
             w.Line();
             w.Line($"public {groupReaderType}(global::System.ReadOnlySpan<byte> buffer) => _buffer = buffer;");
             w.Line();
@@ -387,9 +415,18 @@ namespace FixSourceGenerator.Generators
             w.Open("public ref struct Enumerator");
             w.Line($"private {_runtimeNs}.FixGroupEnumerator _inner;");
             w.Line();
-            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags, sortedEntryTags: true);");
+            string nestedSkipper = needsNestedBoundaries ? ", nestedGroupSkipper: NestedGroupSkipper" : string.Empty;
+            string bitmapArgument = entryTagBits == null ? string.Empty : ", bitmapEntryTags: true";
+            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, {membership}, sortedEntryTags: true{nestedSkipper}{bitmapArgument});");
             w.Line();
             w.Line($"public {entryReaderType} Current => new {entryReaderType}(_inner.Current);");
+            w.Line();
+            // Raw per-entry span, alongside the full entry reader above (issue #32): lets a
+            // caller feed a single entry's bytes into a selective [FixView]-style projection
+            // (e.g. one targeting this group's own scope, or a component nested inside it)
+            // without paying for the full {entryReaderType}'s scan of every field declared at
+            // this level when only 1-2 are actually read.
+            w.Line("public global::System.ReadOnlySpan<byte> CurrentSpan => _inner.Current;");
             w.Line();
             w.Line("public bool MoveNext() => _inner.MoveNext();");
             w.Close();
@@ -398,6 +435,22 @@ namespace FixSourceGenerator.Generators
             EmitReader(w, entryReaderType, groupRef.Entries);
 
             w.Close();
+        }
+
+        private static int[]? CreateEntryTagBitmap(IReadOnlyList<int> tags)
+        {
+            if (tags.Count <= 16 || tags[0] < 0)
+                return null;
+
+            // Cap each bitmap at 8 KiB and never exceed the replaced integer-array payload.
+            int words = (tags[tags.Count - 1] >> 5) + 1;
+            if (words > 2048 || words > tags.Count)
+                return null;
+
+            var bits = new int[words];
+            foreach (int tag in tags)
+                bits[tag >> 5] |= 1 << (tag & 31);
+            return bits;
         }
 
         private static string Join(IReadOnlyList<int> tags)

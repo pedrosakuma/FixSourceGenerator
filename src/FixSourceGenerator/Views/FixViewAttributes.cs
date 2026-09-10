@@ -31,10 +31,12 @@ namespace FixSourceGenerator.Attributes
 {
     /// <summary>
     /// Marks a <c>partial struct</c> as a selective projection ('view') over the fields of a
-    /// single FIX message. The generator matches each <c>partial</c> property declared on the
-    /// struct against the named message's fields (by property name, or by an explicit
-    /// <see cref=""FixFieldAttribute""/> override) and emits a single forward-only, early-exit
-    /// scanning constructor plus the missing property bodies.
+    /// single FIX message, component, or repeating group entry scope. Dotted paths rooted at a
+    /// message or component select an otherwise ambiguous nested occurrence. The
+    /// generator matches each <c>partial</c> property declared on the struct against the target
+    /// scope's fields (by property name, or by an explicit <see cref=""FixFieldAttribute""/>
+    /// override) and emits a single forward-only, early-exit scanning constructor plus the
+    /// missing property bodies.
     /// </summary>
     [System.AttributeUsage(System.AttributeTargets.Struct, AllowMultiple = false, Inherited = false)]
     public sealed class FixViewAttribute : System.Attribute
@@ -44,7 +46,9 @@ namespace FixSourceGenerator.Attributes
             MessageName = messageName;
         }
 
-        /// <summary>The target message's &lt;message name=""...""&gt; from the loaded schema.</summary>
+        /// <summary>
+        /// The target scope's simple name or qualified message/component path.
+        /// </summary>
         public string MessageName { get; }
     }
 
