@@ -55,7 +55,7 @@ namespace FixSourceGenerator.Generators
             string r = $"{runtimeNs}.FixSpanReader";
             int delimiter = FixEntryHelpers.GetDelimiterTag(group.Entries);
             w.Line();
-            w.Open($"private static bool TrySkip{ids[group]}(global::System.ReadOnlySpan<byte> buffer, int position, int count, out int end, bool allowTrailingDelimiter = false)");
+            w.Open($"internal static bool TrySkip{ids[group]}(global::System.ReadOnlySpan<byte> buffer, int position, int count, out int end, bool allowTrailingDelimiter = false)");
             w.Line("end = position;");
             w.Open("if (count < 0)");
             w.Line("return false;");

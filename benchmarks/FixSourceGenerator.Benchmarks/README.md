@@ -665,7 +665,7 @@ Both access cases use the same lazy generated constructor. This measures call-si
 **not an alternative eagerly converting generated constructor**. It does not justify changing
 the default conversion/storage strategy for all consumers.
 
-Generated state/code inspection exposes an important trade-off:
+Generated state/code inspection before helper sharing (`e8c137f`) exposed this trade-off:
 
 | Type | Instance fields | Constructor IL bytes | Declared method IL bytes |
 |---|---:|---:|---:|
@@ -677,9 +677,40 @@ Generated state/code inspection exposes an important trade-off:
 
 Field counts include the source span, not byte-sized instance-layout measurements. Method IL
 excludes constructors and nested types; none of these columns represents native/JIT code size.
-The large X method totals include recursively generated group-boundary helpers, duplicated
-per view. Fewer cached fields do **not** imply less generated code. Reducing helper duplication
-and obtaining more samples remain integration considerations before general adoption.
+Those large X method totals included recursively generated group-boundary helpers duplicated
+per view. Fewer cached fields do **not** imply less generated code.
+
+### Shared helper update (#32)
+
+Views now call one `Runtime.FixViewGroupSkipHelpers` container per runtime namespace. Helpers
+are keyed by resolved group-definition identity, not short names, and retain contextual boundary
+arguments. Using the runtime namespace also avoids colliding with FIX message/component names.
+
+| Type | Previous declared method IL | Shared-helper version |
+|------|----------------------------:|----------------------:|
+| X projection | 96,557 bytes | 665 bytes |
+| W projection | 1,778 bytes | 548 bytes |
+| X two-field projection | 96,006 bytes | 114 bytes |
+
+Field counts and constructor IL are unchanged. **The helper code has not disappeared:** the
+fixture's schema-wide container has 339 methods / **104,814 IL bytes**, shared across its
+header and entry projections. Ordinary reader boundary helpers still have their own schema-level
+copy; the two incremental pipelines have not been combined. These are IL sizes, not native code.
+
+A serial rerun on the same host/runtime and short-run settings above produced:
+
+| Message | Entries | Full decode mean (SD), us | Projected mean (SD), us |
+|---------|--------:|--------------------------:|-----------------------:|
+| X | 1 | 1.318 (0.023) | 0.828 (0.021) |
+| W | 1 | 1.193 (0.024) | 0.760 (0.001) |
+| X | 10 | 11.285 (0.340) | 6.937 (0.108) |
+| W | 10 | 8.332 (0.326) | 5.346 (0.072) |
+| X | 50 | 54.333 (0.133) | 33.755 (0.082) |
+| W | 50 | 37.962 (0.862) | 24.737 (0.701) |
+
+Digests agree and no warmed managed allocation was reported. Projected means remain below full
+decode for these fixtures; three measured iterations and wide confidence intervals do not
+establish precise production speedups or an independent speedup caused by helper sharing.
 
 Run from the relevant worktree root, not its parent repository containing other worktrees
 (otherwise BDN can reject multiple identically named project files):

@@ -473,6 +473,23 @@ quantidade declarada usando delimitador, membership e a topologia recursiva do s
 continuar o scan do pai. Counts negativos, curtos, excessivos ou sem delimitador encerram o scan
 com segurança; uma tag desconhecida fora da membership estabelece o limite normal do grupo.
 
+**Helpers de skip compartilhados entre views (issue #32, follow-up de tamanho de IL):** o método
+que pula um grupo aninhado (`TrySkip{GroupId}`, acima) não é emitido como cópia privada dentro de
+cada `[FixView]` — ele é gerado **uma única vez por schema e por topologia de grupo** em um
+container `internal static class FixViewGroupSkipHelpers`, no namespace de runtime do schema (ex.:
+`Acme.Fix.V50SP2.Runtime.FixViewGroupSkipHelpers`), evitando colisão com nomes de mensagens
+ou componentes FIX. Toda view que precisa pular aquele grupo apenas
+chama `{Schema}.Runtime.FixViewGroupSkipHelpers.TrySkip{GroupId}(...)`. A identidade de cache é a
+referência do `FixGroupRef` já resolvido para aquele schema (não o nome curto do grupo): dois
+schemas carregados na mesma compilação nunca compartilham um helper mesmo quando declaram grupos
+com o mesmo nome curto (ex.: `NoMDEntries` em `MDIncGrp` vs. em `MDFullGrp`), porque cada um
+resolve para uma instância de `FixGroupRef` distinta, ancorada ao namespace do seu próprio schema.
+Sem essa consolidação, o escopo de entrada X do FIX50SP2 (dezenas de componentes/grupos aninhados
+sob `NoMDEntries`) chegava a ~96KB de IL duplicada **por view** que projetasse esse escopo; com o
+container compartilhado, cada view carrega apenas o código de chamada (algumas centenas de bytes),
+e o corpo dos helpers é pago uma única vez, reaproveitado por todas as views (e, potencialmente, por
+múltiplas ocorrências do mesmo grupo) que compartilham a mesma topologia.
+
 **Primeira ocorrência vence em duplicatas (early-exit):** a exemplo do reader completo (que sempre
 usa a *última* ocorrência de uma tag duplicada, §2), a view com early-exit usa a **primeira**
 ocorrência dentro do escopo aplicável — uma tag duplicada antes do fechamento do early-exit não

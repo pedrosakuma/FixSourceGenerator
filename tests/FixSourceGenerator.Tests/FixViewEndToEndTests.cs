@@ -61,9 +61,56 @@ public class FixViewEndToEndTests
         return (driver.GetRunResult(), compilation);
     }
 
+    private static (GeneratorDriverRunResult Result, CSharpCompilation Compilation) RunGeneratorWithSchemas(
+        string consumerSource, (string FileName, string Xml)[] schemas, string? rootNamespace = "Acme")
+    {
+        var additionalTexts = schemas
+            .Select(s => (AdditionalText)new InMemoryAdditionalText(
+                Path.Combine(AppContext.BaseDirectory, "TestData", s.FileName), s.Xml))
+            .ToArray();
+
+        var optionsProvider = new InMemoryAnalyzerConfigOptionsProvider(rootNamespace);
+
+        var generator = new global::FixSourceGenerator.FixSourceGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(
+            generators: new ISourceGenerator[] { generator.AsSourceGenerator() },
+            additionalTexts: additionalTexts,
+            parseOptions: new CSharpParseOptions(LanguageVersion.Preview),
+            optionsProvider: optionsProvider);
+
+        var tpa = (string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!;
+        var references = tpa
+            .Split(Path.PathSeparator)
+            .Where(p => p.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) && File.Exists(p))
+            .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
+            .ToArray();
+
+        var consumerTree = CSharpSyntaxTree.ParseText(consumerSource, new CSharpParseOptions(LanguageVersion.Preview));
+        var compilation = CSharpCompilation.Create(
+            "FixViewTestAssembly",
+            new[] { consumerTree },
+            references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+        driver = driver.RunGenerators(compilation);
+        return (driver.GetRunResult(), compilation);
+    }
+
     private static Assembly CompileGeneratedAssembly(string consumerSource, string schemaXml)
     {
         var (result, compilation) = RunGeneratorWithSchema(consumerSource, schemaXml);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        var finalCompilation = compilation.AddSyntaxTrees(
+            result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+        return Assembly.Load(stream.ToArray());
+    }
+
+    private static Assembly CompileGeneratedAssembly(string consumerSource, (string FileName, string Xml)[] schemas)
+    {
+        var (result, compilation) = RunGeneratorWithSchemas(consumerSource, schemas);
         Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
         var finalCompilation = compilation.AddSyntaxTrees(
             result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree));
@@ -824,6 +871,189 @@ namespace Acme.Views
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         Assert.Equal(3, assembly.GetType("Acme.Views.SparseView")!.GetFields(fields).Length);
         Assert.Equal(9, assembly.GetType("Acme.Views.DenseView")!.GetFields(fields).Length);
+    }
+
+    [Fact]
+    public void Helper_container_does_not_collide_with_a_FIX_message_name()
+    {
+        const string source = """
+            using FixSourceGenerator.Attributes;
+            namespace Acme.Views
+            {
+                [FixView("FixViewGroupSkipHelpers.NoOuter")]
+                public readonly ref partial struct Projection
+                {
+                    public partial int? AfterValue { get; }
+                }
+                public static class Harness
+                {
+                    public static int? Read(byte[] buffer) => new Projection(buffer).AfterValue;
+                }
+            }
+            """;
+        var assembly = CompileGeneratedAssembly(
+            source, NestedScopeSchema.Replace("Envelope", "FixViewGroupSkipHelpers"));
+        Assert.Equal(9, assembly.GetType("Acme.Views.Harness")!.GetMethod("Read")!.Invoke(null,
+            new object[] { TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "1003=9") }));
+        Assert.NotNull(assembly.GetType("Acme.Fix.V44.Runtime.FixViewGroupSkipHelpers"));
+    }
+
+    [Fact]
+    public void Group_helper_container_is_shared_across_multiple_views_of_the_same_topology()
+    {
+        // Both views target "Envelope.NoOuter", which reaches the same NoInner group topology
+        // (issue #32 follow-up): the nested-group skip helper must be emitted once for this
+        // schema and referenced by both views, not duplicated per struct.
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct FirstView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+    }
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct SecondView
+    {
+        public partial int? AfterValue { get; }
+    }
+    public static class SharedHelperHarness
+    {
+        public static byte[] FirstOuterId(byte[] buffer) => new FirstView(buffer).OuterID.ToArray();
+        public static int? SecondAfterValue(byte[] buffer) => new SecondView(buffer).AfterValue;
+    }
+}
+";
+        var (result, compilation) = RunGeneratorWithSchema(source, NestedScopeSchema);
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var generated = result.Results.SelectMany(r => r.GeneratedSources).ToArray();
+
+        // Exactly one shared container for this schema, however many views target its topology.
+        var helperFiles = generated.Where(s => s.HintName.Contains("FixViewGroupSkipHelpers")).ToArray();
+        Assert.Single(helperFiles);
+
+        // Neither view's own generated file declares a TrySkip method anymore — both call into
+        // the shared container instead.
+        foreach (var viewFile in generated.Where(s => s.HintName.Contains("FirstView") || s.HintName.Contains("SecondView")))
+        {
+            Assert.DoesNotContain("bool TrySkip", viewFile.SourceText.ToString());
+            Assert.Contains("FixViewGroupSkipHelpers.TrySkip", viewFile.SourceText.ToString());
+        }
+
+        // The shared container declares the NoInner skip helper exactly once (not once per view).
+        string helperSource = helperFiles[0].SourceText.ToString();
+        int declarationCount = helperSource.Split(new[] { "internal static bool TrySkip" }, StringSplitOptions.None).Length - 1;
+        Assert.Equal(1, declarationCount);
+
+        var finalCompilation = compilation.AddSyntaxTrees(generated.Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+        var assembly = Assembly.Load(stream.ToArray());
+
+        byte[] buffer = TestSupport.Fix("1001=OUTER", "2000=1", "2001=INNER", "1003=9");
+        var harness = assembly.GetType("Acme.Views.SharedHelperHarness")!;
+        var outerId = (byte[])harness.GetMethod("FirstOuterId")!.Invoke(null, new object[] { buffer })!;
+        Assert.Equal("OUTER", System.Text.Encoding.ASCII.GetString(outerId));
+        Assert.Equal(9, harness.GetMethod("SecondAfterValue")!.Invoke(null, new object[] { buffer }));
+    }
+
+    // Same group short names ("NoOuter"/"NoInner") as NestedScopeSchema, under a differently
+    // named message and a different FIX minor version — deliberately reusing the same field
+    // numbers so a registry keyed only by short name (instead of schema + topology) would
+    // silently cross-wire the two schemas' skip helpers.
+    private const string NestedScopeSchemaOtherVersion = @"<fix type=""FIX"" major=""4"" minor=""3"" servicepack=""0"">
+  <header><field name=""MsgType"" required=""Y""/></header>
+  <trailer><field name=""CheckSum"" required=""Y""/></trailer>
+  <messages>
+    <message name=""EnvelopeAlt"" msgtype=""U2"" msgcat=""app"">
+      <group name=""NoOuter"" required=""N"">
+        <field name=""OuterID"" required=""Y""/>
+        <group name=""NoInner"" required=""N"">
+          <field name=""InnerID"" required=""Y""/>
+        </group>
+        <field name=""AfterValue"" required=""N""/>
+      </group>
+    </message>
+  </messages>
+  <components/>
+  <fields>
+    <field number=""35"" name=""MsgType"" type=""STRING""/>
+    <field number=""10"" name=""CheckSum"" type=""STRING""/>
+    <field number=""1000"" name=""NoOuter"" type=""NUMINGROUP""/>
+    <field number=""1001"" name=""OuterID"" type=""STRING""/>
+    <field number=""2000"" name=""NoInner"" type=""NUMINGROUP""/>
+    <field number=""2001"" name=""InnerID"" type=""STRING""/>
+    <field number=""1003"" name=""AfterValue"" type=""INT""/>
+  </fields>
+</fix>";
+
+    [Fact]
+    public void Group_helper_containers_stay_isolated_across_different_schemas()
+    {
+        const string source = @"
+using FixSourceGenerator.Attributes;
+namespace Acme.Views
+{
+    [FixView(""Envelope.NoOuter"")]
+    public readonly ref partial struct MainView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+        public partial int? AfterValue { get; }
+    }
+    [FixView(""EnvelopeAlt.NoOuter"")]
+    public readonly ref partial struct AltView
+    {
+        public partial global::System.ReadOnlySpan<byte> OuterID { get; }
+        public partial int? AfterValue { get; }
+    }
+    public static class MultiSchemaHarness
+    {
+        public static (byte[] OuterId, int? AfterValue) ReadMain(byte[] buffer)
+        {
+            var v = new MainView(buffer);
+            return (v.OuterID.ToArray(), v.AfterValue);
+        }
+        public static (byte[] OuterId, int? AfterValue) ReadAlt(byte[] buffer)
+        {
+            var v = new AltView(buffer);
+            return (v.OuterID.ToArray(), v.AfterValue);
+        }
+    }
+}
+";
+        var (result, compilation) = RunGeneratorWithSchemas(source, new[]
+        {
+            ("FIX44-nested.xml", NestedScopeSchema),
+            ("FIX43-nested.xml", NestedScopeSchemaOtherVersion),
+        });
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+
+        var generated = result.Results.SelectMany(r => r.GeneratedSources).ToArray();
+        var helperFiles = generated.Where(s => s.HintName.Contains("FixViewGroupSkipHelpers")).ToArray();
+        // One shared container PER schema — never a single one shared across schemas.
+        Assert.Equal(2, helperFiles.Length);
+        Assert.Contains(helperFiles, f => f.HintName.StartsWith("Acme.Fix.V44."));
+        Assert.Contains(helperFiles, f => f.HintName.StartsWith("Acme.Fix.V43."));
+
+        var finalCompilation = compilation.AddSyntaxTrees(generated.Select(s => s.SyntaxTree));
+        using var stream = new MemoryStream();
+        var emitted = finalCompilation.Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+        var assembly = Assembly.Load(stream.ToArray());
+
+        var harness = assembly.GetType("Acme.Views.MultiSchemaHarness")!;
+        byte[] mainBuffer = TestSupport.Fix("1001=MAIN", "2000=1", "2001=INNER", "1002=7", "1003=9");
+        var main = ((byte[] OuterId, int? AfterValue))harness.GetMethod("ReadMain")!.Invoke(null, new object[] { mainBuffer })!;
+        Assert.Equal("MAIN", System.Text.Encoding.ASCII.GetString(main.OuterId));
+        Assert.Equal(9, main.AfterValue);
+
+        byte[] altBuffer = TestSupport.Fix("1001=ALT", "2000=1", "2001=INNER", "1003=5");
+        var alt = ((byte[] OuterId, int? AfterValue))harness.GetMethod("ReadAlt")!.Invoke(null, new object[] { altBuffer })!;
+        Assert.Equal("ALT", System.Text.Encoding.ASCII.GetString(alt.OuterId));
+        Assert.Equal(5, alt.AfterValue);
     }
 
     [Fact]

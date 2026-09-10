@@ -57,6 +57,20 @@ else if (args is ["--reader-fixview-code-size"])
             .Sum(method => method.GetMethodBody()?.GetILAsByteArray()?.Length ?? 0);
         Console.WriteLine($"{type.Name}: state-fields={fields}, constructor-il-bytes={constructorBytes}, declared-method-il-bytes={methodBytes}");
     }
+
+    // Shared group-boundary skip helper container (issue #32 follow-up): a single, schema-scoped
+    // internal static class holding every TrySkip{GroupId} method needed by *any* [FixView] over
+    // this schema, reused (not duplicated) across XEntryProjection/WEntryProjection/
+    // XRepeatedProjection above.
+    Type helpers = typeof(FixSourceGenerator.Benchmarks.Generated.Fix.V50SP2.MDIncGrpReader).Assembly
+        .GetType("FixSourceGenerator.Benchmarks.Generated.Fix.V50SP2.Runtime.FixViewGroupSkipHelpers")!;
+    int helperMethodCount = helpers.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly)
+        .Length;
+    int helperBytes = helpers.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly)
+        .Sum(method => method.GetMethodBody()?.GetILAsByteArray()?.Length ?? 0);
+    Console.WriteLine($"{helpers.Name}: methods={helperMethodCount}, total-il-bytes={helperBytes} (shared once across every [FixView] above)");
 }
 else
 {
