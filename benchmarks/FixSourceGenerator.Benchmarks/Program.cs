@@ -1,7 +1,19 @@
 using BenchmarkDotNet.Running;
 using FixSourceGenerator.Benchmarks;
 
-if (args is ["--native-dto-load"])
+if (args is ["--direct-writer-load"])
+{
+    DirectWriterExperiments.Load();
+}
+else if (args is ["--direct-writer-check"])
+{
+    DirectWriterExperiments.Check();
+}
+else if (args is ["--direct-writer-confirm"])
+{
+    DirectWriterExperiments.Load(confirmation: true);
+}
+else if (args is ["--native-dto-load"])
 {
     NativeDtoExperiments.Load();
 }

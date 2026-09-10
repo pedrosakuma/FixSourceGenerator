@@ -379,6 +379,184 @@ dotnet "$DLL" --native-dto-load | grep '^{' > benchmarks/experiments/codec-desig
 python3 benchmarks/experiments/shared/native-dto-summary.py > benchmarks/experiments/codec-design-results/native-dto-summary.csv
 ```
 
+## Direct borrowed reader → existing typed writer (follow-up round)
+
+Source: `DirectWriterExperiments.cs`, after native DTO commit `55a0173`, on the same
+experimental branch based on main `c0765c8`. **No generator/runtime/API changes or fused
+scanner.** This round reuses the complete controlled `NativeDto.xml` UND dictionary,
+`NativeRoundtripWorkload` fixture, its actual generated-writer DTO adapter, and independent
+string-based byte oracle. It is not the partial X numeric projection from earlier rounds.
+
+### Contract and fair input-start boundary
+
+`DirectReadWrite` borrows the immutable input, parses header scalars using the existing
+generated runtime (there is no generated header reader), enumerates existing generated UND
+entry readers, caches nullable decimals in locals and passes identifier/header byte spans
+straight to the existing scoped writer. It processes one entry at a time. The source array
+stays alive until `Finish`; the owned destination is always a distinct array. There is no
+raw passthrough, initial input copy in the timed path, or whole-message value/index cache:
+**even None fully decodes/re-encodes known fields and finishes BodyLength/checksum.**
+
+`DtoFreshReadWrite` starts at the identical input, uses the **same header scan and native
+scalar parsers**, owns sender/target/entry strings and a fresh message/list/entry graph,
+applies the same logical plan, then calls the previous round's actual typed writer adapter.
+Both use the same generated factory, upfront group count, required entry ID, optional
+price/size setters and `EndGroup(...).Finish()` path. The DTO retains its existing presence/
+dirty semantics; the direct path needs nullable locals, not dirty masks. FourEdits measures
+four native setter updates versus four local updates followed by one write, not an isolated
+equal-cost setter microbenchmark. There is no setup-excluded resident DTO in this comparison.
+
+The former DTO adapter's timestamp-string acquisition was **not** reused: both new paths
+parse the timestamp natively. Consequently UND50 DTO acquisition/write allocates 6,192 B,
+64 B less than the previous round's 6,256 B. Old timings are **not** comparison baselines.
+The primary pair reuses the same 16,384-byte destination capacity. Both writer state arrays
+are initialized in setup and safely reused; DTO UTF8 serialization uses the existing
+512-byte scratch array. Input, expected bytes, fixture graph, replacement plans, state and
+buffers are setup-resident and excluded from per-operation allocation, not claimed free
+in total memory. FreshOutput separately allocates a new 16 KiB destination on every call.
+
+All replacement strings **and** their UTF8 bytes are preallocated; the application plan is
+assumed available in each representation. Converting a newly received .NET string into a
+direct-path replacement buffer is not timed. DTO conversion of its final owned strings
+to UTF8 is timed; unchanged direct identifiers never take UTF8→string→UTF8. Both include
+every per-message header scan, group traversal and scalar parse; no entry offsets or
+parsed scan cache are precomputed. This is a full transformation, not a selective-read test.
+
+| Plan | Full output transformation |
+|------|----------------------------|
+| None | No logical change, full canonical re-encode |
+| Scalar | First entry Price becomes present zero; Size becomes absent |
+| Grow | First ID becomes `AÇÃO-IDENTIFIER-GROWN-0000000000000000000000` (UTF8 growth) |
+| Shrink | First ID becomes `Z` |
+| FourEdits | First ID: G → long ID → MID → FINAL-IDENTIFIER; Price: 102.5 → absent → zero → 102.5; write only once |
+| FilterSome | Keep original entries whose input Price is present and ≥120; preserve input order |
+
+Dense sources are exactly the preceding round's canonical fixtures: IDs `ENTRY-nnn`,
+Price `101.25 + index`, Size 100. Mixed cycles `(Price, Size)` through `(absent, 0)`,
+`(0, absent)`, `(101.25 + index, 100)`. Sparse correctness inputs omit both numbers.
+FilterSome keeps **31/50 dense** or **10/50 mixed** rows; at 1/10 dense it keeps **zero**,
+not “some.” FilterAll/FilterNone correctness cases explicitly check all/zero survivors.
+No reordering, nested groups/components, unknown tags, duplicate tags, malformed input,
+arbitrary text encodings or arbitrary wire formatting are supported by this experiment.
+Known-field order and numeric/time formatting follow generated canonical output. Exact
+byte identity is required only for this canonical source; no lossless general FIX relay
+claim is made.
+
+### Correctness and filter work
+
+`--direct-writer-check` checks **1,152 outputs**: 0/1/10/50 entries × dense/sparse/mixed ×
+eight plans × fresh/reused destinations × three state reuses × both methods. Expected
+semantics come from fixture-native values, before either timed decoder runs; expected
+filtering/edits deliberately do not call the timed predicate/transform helpers. Both outputs
+must match the complete independent byte oracle, with additional independently calculated
+BodyLength/checksum, group row count, source immutability/nonaliasing and unchanged canonical
+byte checks. This covers clearing present zero, setting absent to zero, retaining absent
+and present-zero optional values, Unicode growth, shrink and empty groups.
+`--design-check` includes this command's checks, so existing CI covers the new experiment.
+
+Direct filtering includes **two full group traversals**: count before `BeginNoEntries`,
+then evaluate the same input predicate and emit. At 50 entries it invokes Price getters
+100 times, versus 50 for DTO acquisition; Size getters are 31 dense / 10 mixed versus 50
+for the DTO. Absent getters return null rather than parse a numeric payload. The DTO
+materializes all entries, then stably compacts the list in one allocation-free linear
+pass over owned values; it does not acquire only survivors. Work counts in JSON are
+derived outside timing, not instrumented counters. Caching the first direct pass into
+an array, or bypassing the count contract, would be a different experiment.
+
+### Measurements: preserve noisy matrix, add bounded confirmation
+
+SDK 10.0.400, .NET 10.0.11, Ubuntu 24.04.4 x64, AMD EPYC 7763 (16 exposed logical CPUs),
+workstation GC. Two sequential independent processes, 44 method/case rows each, 200 ms
+warmup per variant and eight rotated 100 ms blocks. Alternation reverses the pair each
+round; each method reconstructs its own per-message input state. No concurrent timed
+load/build was launched by this experiment; shared-host scheduling is uncontrolled.
+Each block records operations, current-thread allocated bytes and process GC deltas.
+The harness batches 32 calls and consumes returned frame lengths. Values are medians of
+block means, **not operation percentiles, confidence intervals or BDN results**.
+
+The original matrix was severely noisy: UND50 None direct ranged 28.560–118.370 µs in
+process 1, versus 22.036–33.148 µs in process 2. **Do not treat its small latency deltas as
+resolved wins** or compare absolute timings between processes. All 704 original blocks
+remain available; none were discarded. Full raw data: `direct-writer-run1.jsonl` /
+`direct-writer-run2.jsonl`; `direct-writer-summary.csv` includes absolute and percentage
+deltas for **every** scenario, including 1/10 entries.
+
+Original matrix, UND50, µs **process 1 / process 2**. Reduction is `(DTO − direct) / DTO`;
+negative means direct was slower.
+
+| Plan / density | DirectReadWrite µs | DtoFreshReadWrite µs | Direct reduction % | Direct / DTO B/op |
+|----------------|-------------------|---------------------|--------------------|-------------------|
+| None / dense | 65.086 / 26.634 | 67.880 / 27.121 | 4.1 / 1.8 | 0 / 6,192 |
+| Scalar / dense | 90.596 / 23.091 | 107.357 / 27.247 | 15.6 / 15.3 | 0 / 6,192 |
+| Grow / dense | 91.213 / 23.187 | 113.002 / 25.276 | 19.3 / 8.3 | 0 / 6,192 |
+| Shrink / dense | 80.443 / 23.252 | 104.163 / 26.353 | 22.8 / 11.8 | 0 / 6,192 |
+| FourEdits / dense | 84.179 / 24.185 | 102.169 / 27.300 | 17.6 / 11.4 | 0 / 6,192 |
+| FilterSome / dense | 118.328 / 25.978 | 91.328 / 23.377 | −29.6 / −11.1 | 0 / 6,192 |
+| None / mixed | 59.616 / 14.751 | 80.486 / 18.347 | 25.9 / 19.6 | 0 / 6,192 |
+| Scalar / mixed | 59.614 / 14.680 | 75.795 / 19.288 | 21.3 / 23.9 | 0 / 6,192 |
+| FilterSome / mixed | 66.388 / 13.957 | 51.904 / 11.953 | −27.9 / −16.8 | 0 / 6,192 |
+| FourEdits / dense, fresh destination | 91.584 / 24.050 | 110.844 / 30.534 | 17.4 / 21.2 | 16,408 / 22,600 |
+
+At UND1 / UND10, all reusable-output direct variants measured 0 B/op; fresh DTOs measured
+312 / 1,392 B/op. Original dense None direct versus DTO was 4.975/6.692 µs and 1.203/1.530 µs
+at UND1; 20.951/23.199 µs and 5.135/5.519 µs at UND10 (each pair is direct/DTO, first then
+second process). Some small-case signs reversed, e.g. UND10 Shrink: −5.8% then +24.4%;
+zero-survivor filtering at UND10: +6.3% then −12.0%. Allocation, not those timing signs,
+is the robust observation for the small matrix.
+
+Because of that variability, a **bounded follow-up selected after observing the matrix**
+kept only UND50 dense None/FourEdits/FilterSome plus mixed FilterSome. Two further sequential
+processes, eight method/case rows each, **1 s warmups + eight 1 s rotated blocks**. Same
+workload methods and boundaries; only harness case selection/durations changed. This is
+longer-block confirmation, not a full-matrix rerun or BenchmarkDotNet. All 128 additional
+blocks and paired summaries are retained in `direct-writer-confirm-run1.jsonl`,
+`direct-writer-confirm-run2.jsonl`, `direct-writer-confirm-summary.csv`.
+
+| Confirmation at UND50 | Direct µs, P1 / P2 | Fresh DTO µs, P1 / P2 | Saved µs, P1 / P2 | Reduction %, P1 / P2 |
+|-----------------------|---------------------|-----------------------|-------------------|---------------------|
+| Dense None | 17.437 / 17.167 | 19.482 / 19.732 | 2.045 / 2.565 | 10.5 / 13.0 |
+| Dense FourEdits | 16.843 / 17.237 | 20.568 / 19.940 | 3.724 / 2.703 | 18.1 / 13.6 |
+| Dense FilterSome (31 survivors) | 20.068 / 19.903 | 17.234 / 17.224 | −2.834 / −2.679 | −16.4 / −15.6 |
+| Mixed FilterSome (10 survivors) | 12.063 / 11.725 | 10.627 / 10.729 | −1.436 / −0.995 | −13.5 / −9.3 |
+
+Every confirmation pair remains **0 / 6,192 B/op**. Dense None block ranges were direct
+16.184–21.376 / 16.135–18.899 µs and DTO 18.520–21.999 / 19.208–21.968 µs: still shared-host
+variation, not a universal speedup bound. GC counts across timed matrix blocks were
+105/4/1 then 327/4/1 (Gen0/1/2); confirmation 730/11/0 then 746/11/1. Counts are process
+events during blocks, not object retention or events exclusively caused by a particular
+method, and longer/cheaper blocks perform different numbers of operations.
+
+**Finding:** this existing borrowed API can already avoid the owned graph and unchanged
+text conversions for complete known messages, without fusion or a new public API. In
+longer-block full-copy/four-edit checks it also reduced elapsed time. Filtering reverses
+the timing result despite zero allocation: the extra traversal/predicate parsing exceeds
+the ownership savings for these fixtures. “Avoids allocations” does not imply “always
+fastest”; a retained mutable DTO may suit other lifecycles, and the data do not establish
+the best general architecture. Source lifetime, group count and controlled topology are
+part of the result, not removable footnotes. No merge, adoption or package publication.
+
+Validation: targeted Release build, standalone direct/native checks and all six existing
+CI fixture commands passed. Independent local implementation review preceded measurement;
+the retained raw/CSV samples and final reporting were also reviewed. Summary scripts
+validate case counts, eight blocks, medians, allocation arithmetic and paired dimensions.
+
+Reproduce from this worktree with existing restored dependencies (no new packages):
+
+```bash
+dotnet build benchmarks/FixSourceGenerator.Benchmarks -c Release --no-restore
+DLL=benchmarks/FixSourceGenerator.Benchmarks/bin/Release/net10.0/FixSourceGenerator.Benchmarks.dll
+dotnet "$DLL" --direct-writer-check
+dotnet "$DLL" --design-check
+set -o pipefail
+dotnet "$DLL" --direct-writer-load | grep '^{' > benchmarks/experiments/codec-design-results/direct-writer-run1.jsonl
+dotnet "$DLL" --direct-writer-load | grep '^{' > benchmarks/experiments/codec-design-results/direct-writer-run2.jsonl
+python3 benchmarks/experiments/shared/direct-writer-summary.py > benchmarks/experiments/codec-design-results/direct-writer-summary.csv
+# Optional bounded longer-block confirmation; run only after the matrix has finished.
+dotnet "$DLL" --direct-writer-confirm | grep '^{' > benchmarks/experiments/codec-design-results/direct-writer-confirm-run1.jsonl
+dotnet "$DLL" --direct-writer-confirm | grep '^{' > benchmarks/experiments/codec-design-results/direct-writer-confirm-run2.jsonl
+python3 benchmarks/experiments/shared/direct-writer-summary.py --confirmation > benchmarks/experiments/codec-design-results/direct-writer-confirm-summary.csv
+```
+
 ## Temporal reader (#30)
 
 From an experimental worktree rooted at prework commit `a0b1aab`:
