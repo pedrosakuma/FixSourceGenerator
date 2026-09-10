@@ -114,6 +114,9 @@ public class MarketDataOrderBenchmarks
                 case 126:
                     if (includeTemporal) total += FixSpanReader.ParseDateTime(value).Ticks;
                     break;
+                case 779:
+                    if (!incremental && includeTemporal) total += FixSpanReader.ParseDateTime(value).Ticks;
+                    break;
             }
         }
         if (checkEntryCount && entries != expectedEntries)
