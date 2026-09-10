@@ -53,6 +53,7 @@ public class QuickFixNConformanceTests
 using System;
 using System.Text;
 using QfnConformance.Fix.V44;
+using QfnConformance.Fix.V44.Runtime;
 
 public static class QfnFixTestDriver
 {
@@ -81,15 +82,14 @@ public static class QfnFixTestDriver
     public static byte[] EncodeNewOrderSingle(string clOrdId, string symbol, bool buy, decimal qty, decimal price, DateTime transactTime)
     {
         var dest = new byte[1024];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteClOrdID(A(clOrdId));
-        w.WriteSymbol(A(symbol));
-        w.WriteSide(buy ? Side.Buy : Side.Sell);
-        w.WriteOrderQty(qty);
-        w.WriteOrdType(OrdType.Limit);
-        w.WritePrice(price);
-        w.WriteTransactTime(transactTime);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, ""SENDER""u8, ""TARGET""u8, 1,
+            transactTime, A(clOrdId));
+        var instrument = message.BeginInstrument(A(symbol));
+        var tail = instrument.SkipSecurityID().EndInstrument(
+            buy ? Side.Buy : Side.Sell, transactTime, qty, OrdType.Limit);
+        int len = tail.WritePrice(price).SkipNoPartyIDs().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;
@@ -100,19 +100,14 @@ public static class QfnFixTestDriver
         string senderCompId, string targetCompId, int msgSeqNum, DateTime sendingTime)
     {
         var dest = new byte[1024];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteSenderCompID(A(senderCompId));
-        w.WriteTargetCompID(A(targetCompId));
-        w.WriteMsgSeqNum(msgSeqNum);
-        w.WriteSendingTime(sendingTime);
-        w.WriteClOrdID(A(clOrdId));
-        w.WriteSymbol(A(symbol));
-        w.WriteSide(buy ? Side.Buy : Side.Sell);
-        w.WriteOrderQty(qty);
-        w.WriteOrdType(OrdType.Limit);
-        w.WritePrice(price);
-        w.WriteTransactTime(transactTime);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, A(senderCompId), A(targetCompId),
+            msgSeqNum, sendingTime, A(clOrdId));
+        var instrument = message.BeginInstrument(A(symbol));
+        var tail = instrument.SkipSecurityID().EndInstrument(
+            buy ? Side.Buy : Side.Sell, transactTime, qty, OrdType.Limit);
+        int len = tail.WritePrice(price).SkipNoPartyIDs().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;
@@ -189,6 +184,28 @@ public static class QfnFixTestDriver
         Assert.Equal(2, Call<int>(driver, "NoPartyIDsCount", bytes));
         Assert.Equal("PARTY-1", Call<string>(driver, "ReadPartyID", bytes, 0));
         Assert.Equal("PARTY-2", Call<string>(driver, "ReadPartyID", bytes, 1));
+    }
+
+    [Fact]
+    public void QuickFixN_requires_the_entry_delimiter_even_when_dictionary_required_is_false()
+    {
+        var time = new DateTime(2024, 1, 15, 10, 30, 0, DateTimeKind.Utc);
+        var order = BuildQuickFixNOrder("ALLOC", "MSFT", true, 10m, 1m,
+            "SENDER", "TARGET", 1, time, time);
+        var allocation = new NewOrderSingle.NoAllocsGroup();
+        allocation.Set(new QuickFix.Fields.AllocQty(10m));
+        order.AddGroup(allocation);
+
+        var xml = System.Xml.Linq.XDocument.Load(
+            System.IO.Path.Combine(AppContext.BaseDirectory, "TestData", "FIX44.xml"));
+        Assert.Contains(xml.Descendants("group"), group =>
+            (string?)group.Attribute("name") == "NoAllocs" &&
+            (string?)group.Elements("field").First().Attribute("name") == "AllocAccount" &&
+            (string?)group.Elements("field").First().Attribute("required") == "N");
+
+        string wire = order.ConstructString();
+        Assert.Throws<QuickFix.GroupDelimiterTagException>(() =>
+            new NewOrderSingle().FromString(wire, false, Dictionary, Dictionary, new MessageFactory()));
     }
 
     [Fact]

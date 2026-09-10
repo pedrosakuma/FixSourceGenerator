@@ -10,27 +10,37 @@ public static class StackInputCompilation
 {
     public static int Encode(Span<byte> destination, long orderId)
     {
-        var writer = new NewOrderSingleWriter(destination);
         Span<byte> scratch = stackalloc byte[20];
         if (!Utf8Formatter.TryFormat(orderId, scratch, out int written))
             throw new InvalidOperationException("ID formatting failed.");
-        writer.WriteClOrdID(scratch[..written]);
-        writer.WriteSenderCompID(scratch[..written]);
-        writer.WriteSecurityID(scratch[..written]);
-        writer.WritePrice(long.MinValue, 18);
-        writer.WriteOrderQty(long.MaxValue);
-        writer.WritePrice(123.4500m);
-        WriteParty(ref writer, orderId);
-        return writer.Finish();
-    }
-
-    private static void WriteParty(ref NewOrderSingleWriter writer, long partyId)
-    {
-        Span<byte> scratch = stackalloc byte[20];
-        if (!Utf8Formatter.TryFormat(partyId, scratch, out int written))
-            throw new InvalidOperationException("ID formatting failed.");
-        writer.WriteNoPartyIDs(1);
-        writer.WritePartyID(scratch[..written]);
+        Span<FixWriterState> state = stackalloc FixWriterState[TestRequestWriter.RequiredStateLength];
+        TestRequestWriter.InitializeState(state);
+        var writer = new TestRequestWriter(destination, state, scratch[..written], scratch[..written]);
+        var complete = writer
+            .SkipOnBehalfOfCompID()
+            .SkipDeliverToCompID()
+            .SkipSecureDataLen()
+            .SkipSecureData(int.MaxValue)
+            .SkipSenderSubID()
+            .SkipSenderLocationID()
+            .SkipTargetSubID()
+            .SkipTargetLocationID()
+            .SkipOnBehalfOfSubID()
+            .SkipOnBehalfOfLocationID()
+            .SkipDeliverToSubID()
+            .SkipDeliverToLocationID()
+            .SkipPossDupFlag()
+            .SkipPossResend(DateTime.MinValue)
+            .SkipOrigSendingTime()
+            .SkipXmlDataLen()
+            .SkipXmlData()
+            .SkipMessageEncoding()
+            .SkipLastMsgSeqNumProcessed()
+            .SkipNoHops(scratch[..written]);
+        complete.SetSignatureLength(written);
+        complete.SetSignature(scratch[..written]);
+        scratch.Clear();
+        return complete.Finish();
     }
 
     public static int EncodeRuntime(Span<byte> destination)

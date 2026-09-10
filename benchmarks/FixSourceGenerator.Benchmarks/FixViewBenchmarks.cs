@@ -5,6 +5,7 @@ using BenchmarkDotNet.Jobs;
 using DotnetDiagnostics.BenchmarkDotNet;
 using FixSourceGenerator.Attributes;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44;
+using FixSourceGenerator.Benchmarks.Generated.Fix.V44.Runtime;
 
 namespace FixSourceGenerator.Benchmarks;
 
@@ -28,25 +29,16 @@ public class FixViewBenchmarks
     private static byte[] BuildWireMessage()
     {
         var dest = new byte[512];
-        var w = new NewOrderSingleWriter(dest);
-        w.WriteSenderCompID(Ascii("SENDER"));
-        w.WriteTargetCompID(Ascii("TARGET"));
-        w.WriteMsgSeqNum(7);
-        w.WriteSendingTime(new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc));
-        w.WriteClOrdID(Ascii("ORD-1"));
-        w.WriteSymbol(Ascii("MSFT"));
-        w.WriteSide(Side.Buy);
-        w.WriteOrderQty(100m);
-        w.WriteOrdType(OrdType.Limit);
-        w.WritePrice(101.25m);
-        w.WriteNoPartyIDs(2);
-        w.WritePartyID(Ascii("PARTY-1"));
-        w.WritePartyIDSource((char)'1');
-        w.WritePartyRole(1);
-        w.WritePartyID(Ascii("PARTY-2"));
-        w.WritePartyIDSource((char)'1');
-        w.WritePartyRole(3);
-        int len = w.Finish();
+        Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+        NewOrderSingleWriter.InitializeState(state);
+        var message = new NewOrderSingleWriter(dest, state, Ascii("SENDER"), Ascii("TARGET"), 7,
+            new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), Ascii("ORD-1"));
+        var instrument = message.BeginInstrument(Ascii("MSFT"));
+        var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
+        var group = tail.WritePrice(101.25m).BeginNoPartyIDs(2);
+        group = group.BeginEntry(Ascii("PARTY-1")).WritePartyIDSource('1').WritePartyRole(1).EndEntry();
+        group = group.BeginEntry(Ascii("PARTY-2")).WritePartyIDSource('1').WritePartyRole(3).EndEntry();
+        int len = group.EndGroup().Finish();
         var result = new byte[len];
         Array.Copy(dest, result, len);
         return result;

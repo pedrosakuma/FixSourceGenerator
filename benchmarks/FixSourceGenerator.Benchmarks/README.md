@@ -30,6 +30,139 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
+### Same-build writer pipeline investigation and in-place setters (#31)
+
+`WriterPipelineBenchmarks` compares identical X/W frames in one binary:
+
+- `Raw`: constant-prefix span encoding, capacity checks and envelope finalization.
+- `StateAndCounts`: also initializes the same bounded metadata and enforces generation,
+  poison, entry delimiters, expected counts and closure. It does **not** enforce all generated
+  field-order/domain/required-scope rules, so it is a diagnostic lower bound, not a replacement API.
+- `Scoped`: the generated fluent API with its complete schema checks and consuming handoffs.
+- `InPlace`: the same generated API, using `Set{Field}` for optional-only scalar tails, while
+  retaining required factories and consuming component/group transitions.
+
+The initial 1/50-entry experiment showed severe variance for X/50 in-place (42.57 us mean,
+15.26 us SD). It was not accepted as a speed estimate. A longer, serial 50-entry rerun used
+**two launches, five warmups and ten measured iterations per launch**, with no concurrent builds:
+
+| Message, 50 entries | Raw mean (SD), us | State/count mean (SD), us | Fluent mean (SD), us | In-place mean (SD), us |
+|--------------------|------------------:|-------------------------:|--------------------:|----------------------:|
+| W | 15.99 (0.204) | 20.76 (0.538) | 31.96 (0.899) | 23.37 (0.608) |
+| X | 17.05 (0.334) | 22.24 (0.426) | 38.88 (0.414) | 26.96 (0.520) |
+
+Host: EPYC 7763, Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11, BDN 0.15.8, Release.
+All four paths produce exactly equal bytes, including BodyLength and CheckSum, at 1/10/50
+entries. No warmed managed allocation was reported. State/count safety adds about 30% to raw
+encoding here; generated fluent handoffs add substantially more. In-place means are about
+**27% lower for W and 31% lower for X** than fluent, while retaining generated validation.
+This isolates API-layer overhead (calls/returns/copies), not a measured cost for each individual
+machine instruction. In-place remains 46-58% above raw; raw omits important guarantees.
+
+Small-message performance is not universally improved: the exploratory W/1 means were about
+1.97 us fluent and 1.98 us in-place, where the fixed scope-transition cost dominates. Do not
+extrapolate the 50-entry gains to every schema or frame size.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*WriterPipelineBenchmarks*50*' \
+  --launchCount 2 --warmupCount 5 --iterationCount 10 --buildTimeout 600
+```
+
+The confirmation run temporarily selected only 50-entry parameters; the checked-in benchmark
+also includes one-entry frames. The filter above selects the 50-entry cases.
+The new setters preserve net6/C#11 and the complete FIX44/FIX50SP2 2 GiB managed-heap comparison.
+
+### Before in-place setters: shared scoped writers (#31)
+
+Component/group definitions now produce shared generic templates parameterized by ordinary
+continuation marker structs. Marker-specific closure extensions preserve fluent parent returns
+without using ref structs as generic arguments or raising the net6/C#11 floor. The real full
+FIX44 and FIX50SP2 generation/compilation cases now both pass with the same **2 GiB managed
+heap limit** that rejected the initial scoped candidate.
+
+The full FIX50SP2 evidence contains 1,282 shared definition files, 1,948 shared writer ref-struct
+types and 7,461,436 bytes of shared template source. The X/W principal generated files are
+19,589/46,123 bytes; these small files must not be counted without the shared definitions and
+continuation support they use. No dictionary reduction was used.
+
+The runtime also shares cold validation/throw paths, consumes source handles by invalidating
+their generation, and validates successful mutations once rather than in each preceding guard.
+A mutation marks shared state failed and advances its generation **before** writing; only normal
+return restores active status. Thus any exception still poisons all handles, without per-field
+exception handlers blocking inlining. Invalid arguments on stale handles never poison the live owner.
+
+Latest serial measurements, using the same setup and baseline described below:
+
+| Encoding | Flat baseline, us | Initial scoped draft, us | Shared scopes mean (SD), us |
+|----------|------------------:|-------------------------:|----------------------------:|
+| Small NewOrderSingle, two parties | 0.453 | 1.017 | 0.967 (0.011) |
+| X, 10 entries | 3.282 | 8.246 | 7.654 (0.035) |
+| W, 10 entries | 3.096 | 7.508 | 6.909 (0.055) |
+| X, 50 entries | 15.829 | 39.574 | 36.089 (0.143) |
+| W, 50 entries | 15.037 | 33.724 | 30.083 (0.190) |
+
+No warmed managed allocation was reported. The latest means are lower than the initial draft,
+but short-run intervals overlap in some comparisons: this is not proof of a stable 5-11% gain.
+Encoding remains approximately **2.0-2.33x the recorded flat baseline**, so #39 remains draft
+pending the encoding-cost decision/optimization. The schema-memory blocker is resolved; the
+throughput trade-off is not. Earlier baseline numbers were not rerun in this iteration.
+
+Forcing inlining on generated optional-tail setters was also tried and rejected: its means
+were 0.971/7.994/7.147/37.445/30.942 us in table order, with no observed improvement over the
+retained version. Those extra generated annotations are not part of the candidate.
+
+### Initial scoped writer candidate (#31): historical regressions
+
+The initial candidate was **not ready for merge**. Its structural safety checks increased
+complete encoding time, and full FIX50SP2 generation/compilation has a memory regression.
+The memory finding below describes the initial draft, before shared templates.
+
+Measured serially on AMD EPYC 7763 / Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11,
+BenchmarkDotNet 0.15.8, Release; one launch, two warmups and three measured iterations.
+No implementation builds ran alongside timed workloads. The candidate includes caller-owned
+metadata initialization, required inputs, optional transitions, entry/count closure and `Finish`.
+X/W use the real, full FIX50SP2 dictionary, not a reduced synthetic schema.
+
+| Encoding | Baseline mean (SD), us | Scoped mean (SD), us | Mean ratio |
+|----------|----------------------:|--------------------:|-----------:|
+| Small NewOrderSingle, two parties | 0.453 (0.002) | 1.017 (0.025) | 2.24x |
+| X, 10 entries | 3.282 (0.023) | 8.246 (0.196) | 2.51x |
+| W, 10 entries | 3.096 (0.012) | 7.508 (0.054) | 2.43x |
+| X, 50 entries | 15.829 (0.147) | 39.574 (0.378) | 2.50x |
+| W, 50 entries | 15.037 (0.013) | 33.724 (0.792) | 2.24x |
+
+No managed allocation was reported in these warmed paths. These are short exploratory runs
+with wide 99.9% confidence intervals, not precise production latency guarantees. The ratios
+compare separately measured means; they are not paired BenchmarkDotNet baseline statistics.
+
+The baseline is `68047d0`. For a fair W comparison, its fixture additionally calls
+`writer.WriteLastUpdateTime(_expiry)` immediately after `writer.WriteSymbol("SYMBOL"u8)`.
+The original flat fixture omitted that required field; the scoped API now requires it.
+The table uses the rerun with this correction, not the original incomplete W workload.
+Baseline and candidate X/W frames were compared byte-for-byte at 1/10/50 entries, including
+BodyLength and CheckSum. Their lengths respectively are X: 214/1729/8489 and W: 234/1605/7725.
+
+Run each version from an isolated worktree containing only one matching benchmark project;
+BenchmarkDotNet's solution-root search can otherwise find other worktrees beneath `.git`.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*ReaderWriterBenchmarks.Encode_Generated' \
+    '*MarketDataWriterBenchmarks.X_ScaledAndIntegral' \
+    '*MarketDataWriterBenchmarks.W_ScaledAndIntegral' \
+  --launchCount 1 --warmupCount 2 --iterationCount 3 --buildTimeout 600
+```
+
+Under a 2 GiB managed heap limit (`DOTNET_GCHeapHardLimit=0x80000000`), the existing full-schema
+generation/compilation cases pass for both FIX44 and FIX50SP2 on the baseline. The revised
+candidate passes FIX44 but exhausts memory during Roslyn parsing for FIX50SP2. Passing without
+this limit does not close the resource regression. Optional-tail factoring alone is insufficient;
+generated sub-scope duplication and runtime transition overhead remain blockers for #31.
+
+### Historical small-message comparison
+
 Captured on: AMD EPYC 7763 (WSL/Ubuntu 24.04), .NET 9.0.14, Release, `NewOrderSingle` with one
 component + one 2-entry repeating group (see `ReaderWriterBenchmarks.cs` for the exact message
 shape).

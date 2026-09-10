@@ -1,6 +1,6 @@
 using System;
-using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -9,201 +9,535 @@ namespace FixSourceGenerator.Tests;
 
 public class WriterContractTests
 {
+    [Fact]
+    public void Shared_scope_support_names_do_not_collide_with_FIX_definitions()
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="WriterScopes" msgtype="U1" msgcat="app">
+                  <field name="FixWriterContinuation1" required="Y"/>
+                  <component name="Detail" required="Y"/>
+                </message>
+              </messages>
+              <components>
+                <component name="Detail"><field name="FixWriterScopeExtensions" required="Y"/></component>
+              </components>
+              <fields>
+                <field number="1001" name="FixWriterContinuation1" type="CHAR">
+                  <value enum="1" description="ONE"/>
+                </field>
+                <field number="1002" name="FixWriterScopeExtensions" type="CHAR">
+                  <value enum="1" description="ONE"/>
+                </field>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "names.xml", _ => { });
+        Assert.NotNull(schema);
+        var sources = TestSupport.Generate(schema!, out var diagnostics).ToArray();
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(sources.Length, sources.Select(file => file.hintName).Distinct().Count());
+        const string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class NamingDriver
+            {
+                public static int Encode()
+                {
+                    Span<byte> destination = stackalloc byte[128];
+                    Span<FixWriterState> state = stackalloc FixWriterState[WriterScopesWriter.RequiredStateLength];
+                    WriterScopesWriter.InitializeState(state);
+                    var message = new WriterScopesWriter(destination, state, (FixWriterContinuation1)'1');
+                    return message.BeginDetail((FixWriterScopeExtensions)'1').EndDetail().Finish();
+                }
+            }
+            """;
+        var assembly = TestSupport.EmitAndLoad(sources.Select(file => file.content).Append(driver));
+        Assert.True((int)assembly.GetType("NamingDriver")!.GetMethod("Encode")!.Invoke(null, null)! > 0);
+    }
+
+    [Fact]
+    public void Shared_templates_preserve_nested_continuations_and_definition_identity()
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="FirstMessage" msgtype="U1" msgcat="app">
+                  <field name="FirstID" required="Y"/>
+                  <component name="Shared" required="Y"/>
+                  <field name="AfterShared" required="Y"/>
+                  <group name="NoRows" required="N"><field name="FirstRowID" required="Y"/></group>
+                </message>
+                <message name="SecondMessage" msgtype="U2" msgcat="app">
+                  <field name="SecondID" required="Y"/>
+                  <component name="Shared" required="Y"/>
+                  <field name="AfterShared" required="Y"/>
+                  <group name="NoRows" required="N"><field name="SecondRowID" required="Y"/></group>
+                </message>
+              </messages>
+              <components>
+                <component name="Shared">
+                  <field name="SharedID" required="Y"/>
+                  <component name="Inner" required="Y"/>
+                  <field name="AfterInner" required="Y"/>
+                  <field name="SharedText" required="N"/>
+                </component>
+                <component name="Inner"><field name="InnerID" required="Y"/></component>
+              </components>
+              <fields>
+                <field number="1000" name="FirstID" type="STRING"/>
+                <field number="1001" name="SecondID" type="STRING"/>
+                <field number="1002" name="SharedID" type="STRING"/>
+                <field number="1003" name="InnerID" type="STRING"/>
+                <field number="1004" name="AfterInner" type="INT"/>
+                <field number="1005" name="SharedText" type="STRING"/>
+                <field number="1006" name="AfterShared" type="INT"/>
+                <field number="1100" name="NoRows" type="NUMINGROUP"/>
+                <field number="1101" name="FirstRowID" type="STRING"/>
+                <field number="1102" name="SecondRowID" type="STRING"/>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "shared-writers.xml", _ => { });
+        Assert.NotNull(schema);
+        var generated = TestSupport.Generate(schema!, out var diagnostics);
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Single(generated, file => file.hintName.Contains(".SharedWriterScope", StringComparison.Ordinal));
+        Assert.Equal(2, generated.Count(file => file.hintName.Contains(".NoRowsWriterGroup", StringComparison.Ordinal)));
+
+        string support = Assert.Single(
+            generated,
+            file => file.hintName.EndsWith(".WriterScopes.Support.g.cs", StringComparison.Ordinal)).content;
+        Assert.Contains("struct FixWriterContinuation", support);
+        Assert.Contains("<TOuter>", support);
+
+        string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+
+            public static class SharedWriterDriver
+            {
+                public static string Run()
+                {
+                    Span<byte> firstDestination = stackalloc byte[256];
+                    Span<FixWriterState> firstState = stackalloc FixWriterState[FirstMessageWriter.RequiredStateLength];
+                    FirstMessageWriter.InitializeState(firstState);
+                    var first = new FirstMessageWriter(firstDestination, firstState, "A"u8);
+                    var sharedTerminal = first.BeginShared("S"u8)
+                        .BeginInner("I"u8)
+                        .EndInner(7)
+                        .SkipSharedText();
+                    var alias = sharedTerminal;
+                    var firstGroup = sharedTerminal.EndShared(8).BeginNoRows(1);
+                    try { _ = alias.EndShared(9); }
+                    catch (InvalidOperationException)
+                    {
+                        firstGroup = firstGroup.BeginEntry("R1"u8).EndEntry();
+                        _ = firstGroup.EndGroup().Finish();
+
+                        var secondDestination = new byte[256];
+                        var secondState = new FixWriterState[SecondMessageWriter.RequiredStateLength];
+                        SecondMessageWriter.InitializeState(secondState);
+                        var secondGroup = new SecondMessageWriter(secondDestination, secondState, "B"u8)
+                            .BeginShared("S2"u8)
+                            .BeginInner("I2"u8)
+                            .EndInner(10)
+                            .SkipSharedText()
+                            .EndShared(11)
+                            .BeginNoRows(1);
+                        secondGroup = secondGroup.BeginEntry("R2"u8).EndEntry();
+                        _ = secondGroup.EndGroup().Finish();
+                        return "shared";
+                    }
+                    return "alias-live";
+                }
+            }
+            """;
+        var sources = generated.Select(file => file.content).Append(driver).ToArray();
+        var assembly = TestSupport.EmitAndLoad(sources, "SharedWriterAssembly");
+        Assert.Equal("shared", assembly.GetType("SharedWriterDriver")!.GetMethod("Run")!.Invoke(null, null));
+
+        string missingInputs = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class MissingContinuationInputs
+            {
+                public static void Invalid()
+                {
+                    Span<byte> destination = stackalloc byte[256];
+                    Span<FixWriterState> state = stackalloc FixWriterState[FirstMessageWriter.RequiredStateLength];
+                    FirstMessageWriter.InitializeState(state);
+                    _ = new FirstMessageWriter(destination, state, "A"u8)
+                        .BeginShared("S"u8).BeginInner("I"u8).EndInner();
+                }
+            }
+            """;
+        Assert.Contains(
+            TestSupport.Compile(generated.Select(file => file.content).Append(missingInputs)).GetDiagnostics(),
+            diagnostic => diagnostic.Severity == DiagnosticSeverity.Error && diagnostic.Id == "CS7036");
+    }
+
+    [Theory]
+    [InlineData("WriteValue(7m)", "7")]
+    [InlineData("WriteValue(7L)", "7")]
+    [InlineData("WriteValue(70L, 1)", "7.0")]
+    [InlineData("SkipValue()", null)]
+    [InlineData("SkipDetails()", null)]
+    [InlineData("BeginDetails().EndDetails()", null)]
+    [InlineData("SkipNoNested()", null)]
+    [InlineData("BeginNoNested(0).EndGroup()", null)]
+    public void Optional_tail_does_not_reinvoke_required_int_constructor(string operation, string? expectedValue)
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="IntegerEntryMessage" msgtype="U1" msgcat="app">
+                  <group name="NoRows" required="Y">
+                    <field name="EntryID" required="Y"/>
+                    <field name="Value" required="N"/>
+                    <component name="Details" required="N"/>
+                    <group name="NoNested" required="N"><field name="NestedID" required="Y"/></group>
+                  </group>
+                </message>
+              </messages>
+              <components>
+                <component name="Details"><field name="Text" required="N"/></component>
+              </components>
+              <fields>
+                <field number="1000" name="NoRows" type="NUMINGROUP"/>
+                <field number="1001" name="EntryID" type="INT"/>
+                <field number="1002" name="Value" type="PRICE"/>
+                <field number="1003" name="Text" type="STRING"/>
+                <field number="2000" name="NoNested" type="NUMINGROUP"/>
+                <field number="2001" name="NestedID" type="STRING"/>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "integer-entry.xml", _ => { });
+        Assert.NotNull(schema);
+        var sources = TestSupport.Generate(schema!, out var diagnostics).Select(file => file.content).ToArray();
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class IntegerEntryDriver
+            {
+                public static string Encode()
+                {
+                    Span<byte> destination = stackalloc byte[256];
+                    Span<FixWriterState> state = stackalloc FixWriterState[IntegerEntryMessageWriter.RequiredStateLength];
+                    IntegerEntryMessageWriter.InitializeState(state);
+                    var message = new IntegerEntryMessageWriter(destination, state);
+                    var group = message.BeginNoRows(1);
+            """ + "group = group.BeginEntry(42)." + operation + ".EndEntry();" + """
+                    int length = group.EndGroup().Finish();
+                    return System.Text.Encoding.ASCII.GetString(destination.Slice(0, length));
+                }
+
+                public static bool RejectOutOfOrder()
+                {
+                    Span<byte> destination = stackalloc byte[256];
+                    Span<FixWriterState> state = stackalloc FixWriterState[IntegerEntryMessageWriter.RequiredStateLength];
+                    IntegerEntryMessageWriter.InitializeState(state);
+                    var message = new IntegerEntryMessageWriter(destination, state);
+                    var group = message.BeginNoRows(1);
+            """ + "var entry = group.BeginEntry(42)." + operation + ";" + """
+                    try { _ = entry.WriteValue(8m); return false; }
+                    catch (InvalidOperationException) { }
+                    try { _ = entry.EndEntry(); return false; }
+                    catch (InvalidOperationException) { return true; }
+                }
+            }
+            """;
+        var assembly = TestSupport.EmitAndLoad(sources.Append(driver));
+        string wire = (string)assembly.GetType("IntegerEntryDriver")!.GetMethod("Encode")!.Invoke(null, null)!;
+        Assert.Equal(expectedValue is not null ? new[] { "1001=42", "1002=" + expectedValue } : new[] { "1001=42" },
+            wire.Split('\x01').Where(field => field.StartsWith("1001=", StringComparison.Ordinal) ||
+                field.StartsWith("1002=", StringComparison.Ordinal)).ToArray());
+        Assert.True((bool)assembly.GetType("IntegerEntryDriver")!.GetMethod("RejectOutOfOrder")!.Invoke(null, null)!);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Component_led_group_cannot_finalize_without_its_delimiter(bool writeOtherField)
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="ComponentEntryMessage" msgtype="U1" msgcat="app">
+                  <group name="NoRows" required="Y">
+                    <component name="Leading" required="N"/>
+                    <field name="Value" required="N"/>
+                  </group>
+                </message>
+              </messages>
+              <components>
+                <component name="Leading"><field name="Symbol" required="N"/></component>
+              </components>
+              <fields>
+                <field number="1000" name="NoRows" type="NUMINGROUP"/>
+                <field number="55" name="Symbol" type="STRING"/>
+                <field number="1002" name="Value" type="INT"/>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "component-entry.xml", _ => { });
+        Assert.NotNull(schema);
+        var sources = TestSupport.Generate(schema!, out var diagnostics).Select(file => file.content).ToArray();
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.DoesNotContain(TestSupport.Compile(sources).GetDiagnostics(),
+            diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+
+        string transition = writeOtherField
+            ? "group = group.BeginEntry().SkipLeading().WriteValue(1).EndEntry();"
+            : "group = group.BeginEntry().EndEntry();";
+        string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class MissingDelimiterDriver
+            {
+                public static void Attempt()
+                {
+                    Span<byte> destination = stackalloc byte[256];
+                    Span<FixWriterState> state = stackalloc FixWriterState[ComponentEntryMessageWriter.RequiredStateLength];
+                    ComponentEntryMessageWriter.InitializeState(state);
+                    var message = new ComponentEntryMessageWriter(destination, state);
+                    var group = message.BeginNoRows(1);
+            """ + transition + """
+                    _ = group.EndGroup().Finish();
+                }
+            }
+            """;
+        var compilationErrors = TestSupport.Compile(sources.Append(driver)).GetDiagnostics()
+            .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+        if (compilationErrors.Length > 0)
+        {
+            // Either the type phases prohibit the omission or runtime closure must reject it.
+            Assert.All(compilationErrors, diagnostic =>
+            {
+                string message = diagnostic.GetMessage(System.Globalization.CultureInfo.InvariantCulture);
+                Assert.True(
+                    diagnostic.Id == "CS1061" && (message.Contains("EndEntry") || message.Contains("SkipLeading")) ||
+                    diagnostic.Id == "CS7036" && message.Contains("BeginEntry"),
+                    diagnostic.ToString());
+            });
+            return;
+        }
+
+        var assembly = TestSupport.EmitAndLoad(sources.Append(driver));
+        var method = assembly.GetType("MissingDelimiterDriver")!.GetMethod("Attempt")!;
+        var exception = Assert.Throws<TargetInvocationException>(() => method.Invoke(null, null));
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+    }
+
     private const string Driver = """
         using System;
-        using System.Buffers.Text;
         using System.Text;
         using Acme.Fix.V44;
         using Acme.Fix.V44.Runtime;
 
         public static class WriterContractDriver
         {
-            private static void WriteValue(ref FixSpanWriter writer, int tag, int kind)
+            private static Span<FixWriterState> Initialize(FixWriterState[] state)
             {
-                switch (kind)
-                {
-                    case 0: writer.WriteField(tag, int.MinValue); break;
-                    case 1: writer.WriteField(tag, int.MaxValue); break;
-                    case 2: writer.WriteField(tag, 0); break;
-                    case 3: writer.WriteField(tag, decimal.MinValue); break;
-                    case 4: writer.WriteField(tag, decimal.MaxValue); break;
-                    case 5: writer.WriteField(tag, -0.0000000000000000000000000001m); break;
-                    case 6: writer.WriteField(tag, 123.4500m); break;
-                    case 7: writer.WriteField(tag, true); break;
-                    case 8: writer.WriteField(tag, false); break;
-                    case 9: writer.WriteField(tag, 'A'); break;
-                    case 10: writer.WriteField(tag, "ABC"u8); break;
-                    case 11: writer.WriteField(tag, ReadOnlySpan<byte>.Empty); break;
-                    case 12: writer.WriteField(tag, new DateTime(2024, 2, 29, 23, 59, 59, 123, DateTimeKind.Utc)); break;
-                    case 13: writer.WriteField(tag, DateOnly.MinValue); break;
-                    case 14: writer.WriteField(tag, DateOnly.MaxValue); break;
-                    case 15: writer.WriteField(tag, TimeOnly.MaxValue); break;
-                    case 16: writer.WriteField(tag, long.MinValue); break;
-                    case 17: writer.WriteField(tag, long.MaxValue); break;
-                    case 18: writer.WriteField(tag, long.MinValue, 18); break;
-                    case 19: writer.WriteField(tag, 0L, 18); break;
-                    default: throw new ArgumentOutOfRangeException(nameof(kind));
-                }
+                NewOrderSingleWriter.InitializeState(state);
+                return state;
             }
 
-            private static void AssertPoisoned(ref FixSpanWriter writer)
+            public static byte[] Complete(int capacity, bool nested)
             {
-                int position = writer.Position;
-                for (int operation = 0; operation < 22; operation++)
+                var destination = new byte[capacity];
+                var stateArray = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                var message = new NewOrderSingleWriter(destination, Initialize(stateArray), "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8);
+                var tail = instrument.WriteSecurityID("SEC"u8).EndInstrument(Side.Buy, 0m);
+                var group = tail.WritePrice(0m).SkipTransactTime().SkipExecInst().BeginNoAllocs(1);
+                if (nested)
                 {
-                    try
-                    {
-                        if (operation == 20) writer.BeginMessage("FIX.4.4"u8, "D"u8);
-                        else if (operation == 21) writer.Finish();
-                        else WriteValue(ref writer, 44, operation);
-                    }
+                    var entry = group.BeginEntry("ACC"u8, 0m);
+                    var inner = entry.BeginNoNested(1);
+                    inner = inner.BeginEntry("PARTY"u8).EndEntry();
+                    var completedEntry = inner.EndGroup();
+                    group = completedEntry.EndEntry();
+                }
+                else
+                {
+                    group = group.BeginEntry("ACC"u8, 0m).SkipNoNested().EndEntry();
+                }
+                int length = group.EndGroup().Finish();
+                return destination.AsSpan(0, length).ToArray();
+            }
+
+            public static string EmptyRequired()
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                try { _ = new NewOrderSingleWriter(new byte[128], state, ReadOnlySpan<byte>.Empty); }
+                catch (ArgumentException) { return "empty"; }
+                return "accepted";
+            }
+
+            public static string EmptyOptionalPoisons()
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(new byte[256], state, "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8);
+                var copy = instrument;
+                try { _ = instrument.WriteSecurityID(ReadOnlySpan<byte>.Empty); }
+                catch (ArgumentException)
+                {
+                    try { _ = copy.SkipSecurityID(); }
+                    catch (InvalidOperationException) { return "poisoned"; }
+                }
+                return "accepted";
+            }
+
+            public static string InvalidEnumPoisons()
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(new byte[256], state, "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8).SkipSecurityID();
+                var copy = instrument;
+                try { _ = instrument.EndInstrument((Side)99, 1m); }
+                catch (ArgumentOutOfRangeException)
+                {
+                    try { _ = copy.EndInstrument(Side.Buy, 1m); }
+                    catch (InvalidOperationException) { return "poisoned"; }
+                }
+                return "accepted";
+            }
+
+            public static string InvalidRequiredScalePoisons()
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(new byte[256], state, "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8).SkipSecurityID();
+                var copy = instrument;
+                try { _ = instrument.EndInstrument(Side.Buy, FixDecimal.FromScaled(1, 19)); }
+                catch (ArgumentOutOfRangeException)
+                {
+                    try { _ = copy.EndInstrument(Side.Buy, 1m); }
+                    catch (InvalidOperationException) { return "poisoned"; }
+                }
+                return "accepted";
+            }
+
+            public static string StaleCopies()
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(new byte[256], state, "ORD"u8);
+                var messageCopy = message;
+                var instrument = message.BeginInstrument("SYM"u8);
+                try { _ = messageCopy.BeginInstrument("OTHER"u8); }
+                catch (InvalidOperationException)
+                {
+                    var instrumentCopy = instrument;
+                    var afterSetter = instrument.WriteSecurityID("SEC"u8);
+                    try { _ = instrumentCopy.SkipSecurityID(); }
                     catch (InvalidOperationException)
                     {
-                        if (writer.Position != position)
-                            throw new Exception("An invalid writer advanced.");
-                        continue;
+                        var tail = afterSetter.EndInstrument(Side.Buy, 1m);
+                        var tailCopy = tail;
+                        var next = tail.WritePrice(0m);
+                        try { _ = tailCopy.SkipPrice(); }
+                        catch (InvalidOperationException)
+                        {
+                            _ = next.SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
+                            return "stale";
+                        }
                     }
-                    throw new Exception("An invalid writer accepted operation " + operation);
                 }
+                return "accepted";
             }
 
-            public static string Field(int capacity, int tag, int kind)
+            public static string DefaultHandle()
             {
-                var destination = new byte[capacity + 1];
-                destination[capacity] = 0xCC;
-                var writer = new FixSpanWriter(destination.AsSpan(0, capacity));
+                var writer = default(NewOrderSingleWriter);
+                try { _ = writer.BeginInstrument("SYM"u8); }
+                catch (InvalidOperationException) { return "default"; }
+                return "accepted";
+            }
+
+            public static string StateReuse()
+            {
+                var destination = new byte[512];
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var first = new NewOrderSingleWriter(destination, state, "ONE"u8);
+                try { _ = new NewOrderSingleWriter(destination, state, "TWO"u8); }
+                catch (InvalidOperationException)
+                {
+                    var completed = first.BeginInstrument("SYM"u8).SkipSecurityID()
+                        .EndInstrument(Side.Buy, 1m).SkipPrice().SkipTransactTime()
+                        .SkipExecInst().SkipNoAllocs();
+                    var stale = completed;
+                    _ = completed.Finish();
+                    NewOrderSingleWriter.InitializeState(state);
+                    var second = new NewOrderSingleWriter(destination, state, "TWO"u8);
+                    try { _ = stale.Finish(); }
+                    catch (InvalidOperationException)
+                    {
+                        _ = second.BeginInstrument("SYM"u8).SkipSecurityID()
+                            .EndInstrument(Side.Buy, 1m).SkipPrice().SkipTransactTime()
+                            .SkipExecInst().SkipNoAllocs().Finish();
+                        return "safe";
+                    }
+                }
+                return "accepted";
+            }
+
+            public static string CountMismatch(bool excess)
+            {
+                var state = new FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(new byte[256], state, "ORD"u8);
+                var group = message.BeginInstrument("SYM"u8).SkipSecurityID()
+                    .EndInstrument(Side.Buy, 1m).SkipPrice().SkipTransactTime()
+                    .SkipExecInst().BeginNoAllocs(excess ? 0 : 1);
+                var copy = group;
                 try
                 {
-                    WriteValue(ref writer, tag, kind);
+                    if (excess) _ = group.BeginEntry("ACC"u8, 1m);
+                    else _ = group.EndGroup();
                 }
-                catch (ArgumentException exception) when (exception.ParamName == "destination")
+                catch (InvalidOperationException)
                 {
-                    AssertPoisoned(ref writer);
-                    if (destination[capacity] != 0xCC || writer.Position > capacity)
-                        throw new Exception("Write exceeded the destination.");
-                    return "capacity";
+                    try { _ = copy.EndGroup(); }
+                    catch (InvalidOperationException) { return "poisoned"; }
                 }
-                return Encoding.ASCII.GetString(destination.AsSpan(0, writer.Position));
+                return "accepted";
             }
 
-            public static string Begin(int capacity, bool generated)
+            public static string Capacity(int capacity)
             {
-                var destination = new byte[capacity];
-                if (generated)
-                {
-                    try { _ = new NewOrderSingleWriter(destination); }
-                    catch (ArgumentException exception) when (exception.ParamName == "destination")
-                    {
-                        return "capacity";
-                    }
-                    return "ok";
-                }
-                var writer = new FixSpanWriter(destination);
-                try { writer.BeginMessage("FIX.4.4"u8, "D"u8); }
-                catch (ArgumentException exception) when (exception.ParamName == "destination")
-                {
-                    AssertPoisoned(ref writer);
-                    return "capacity";
-                }
+                try { _ = Complete(capacity, nested: true); }
+                catch (ArgumentException ex) when (ex.ParamName == "destination") { return "capacity"; }
                 return "ok";
             }
 
-            public static string Group(int remaining)
+            public static string Overlap()
             {
-                var destination = new byte[24 + remaining];
-                var writer = new NewOrderSingleWriter(destination);
-                try { writer.WriteNoAllocs(int.MaxValue); }
-                catch (ArgumentException exception) when (exception.ParamName == "destination")
-                {
-                    try { writer.Finish(); }
-                    catch (InvalidOperationException) { return "capacity"; }
-                    throw new Exception("Failed generated writer finalized.");
-                }
-                return "ok";
-            }
-
-            public static byte[] Frame(int bodyLength, int capacity, bool generated)
-            {
-                // MsgType is five bytes; 11=<value><SOH> accounts for four more.
-                var value = new byte[bodyLength - 9];
-                value.AsSpan().Fill((byte)'x');
-                var destination = new byte[capacity];
-                if (generated)
-                {
-                    var message = new NewOrderSingleWriter(destination);
-                    message.WriteClOrdID(value);
-                    try
-                    {
-                        return destination.AsSpan(0, message.Finish()).ToArray();
-                    }
-                    catch (ArgumentException exception) when (exception.ParamName == "destination")
-                    {
-                        try { message.Finish(); }
-                        catch (InvalidOperationException) { return Array.Empty<byte>(); }
-                        throw new Exception("Failed generated finalization succeeded on retry.");
-                    }
-                }
-                var writer = new FixSpanWriter(destination);
-                writer.BeginMessage("FIX.4.4"u8, "D"u8);
-                writer.WriteField(11, value);
-                int position = writer.Position;
-                var beforeFinish = destination.AsSpan().ToArray();
-                try
-                {
-                    return destination.AsSpan(0, writer.Finish()).ToArray();
-                }
-                catch (ArgumentException exception) when (exception.ParamName == "destination")
-                {
-                    if (writer.Position != position || !destination.AsSpan().SequenceEqual(beforeFinish))
-                        throw new Exception("Failed Finish mutated the frame before checking capacity.");
-                    AssertPoisoned(ref writer);
-                    return Array.Empty<byte>();
-                }
-            }
-
-            public static byte[] StackInputs(byte[] destination)
-            {
-                var writer = new NewOrderSingleWriter(destination.AsSpan());
-                Span<byte> scratch = stackalloc byte[20];
-                if (!Utf8Formatter.TryFormat(long.MinValue, scratch, out int written))
-                    throw new Exception("Numeric ID formatting failed.");
-                writer.WriteClOrdID(scratch.Slice(0, written));
-                scratch.Fill((byte)'x');
-                WriteGroup(ref writer);
-                return destination.AsSpan(0, writer.Finish()).ToArray();
-            }
-
-            private static void WriteGroup(ref NewOrderSingleWriter writer)
-            {
-                Span<byte> scratch = stackalloc byte[20];
-                if (!Utf8Formatter.TryFormat(long.MaxValue, scratch, out int written))
-                    throw new Exception("Group ID formatting failed.");
-                writer.WriteNoAllocs(1);
-                writer.WriteAllocAccount(scratch.Slice(0, written));
-                writer.WriteNoNested(1);
-                writer.WriteNestedPartyID(scratch.Slice(0, written));
-                scratch.Clear();
-            }
-
-            public static byte[] RuntimeStackInputs(byte[] destination)
-            {
-                var writer = new FixSpanWriter(destination.AsSpan());
-                Span<byte> begin = stackalloc byte[] { 70, 73, 88, 46, 52, 46, 52 };
-                Span<byte> type = stackalloc byte[] { 68 };
-                writer.BeginMessage(begin, type);
-                begin.Clear();
-                type.Clear();
-                WriteRuntimeId(ref writer);
-                return destination.AsSpan(0, writer.Finish()).ToArray();
-            }
-
-            private static void WriteRuntimeId(ref FixSpanWriter writer)
-            {
-                Span<byte> scratch = stackalloc byte[20];
-                if (!Utf8Formatter.TryFormat(long.MinValue, scratch, out int written))
-                    throw new Exception("Numeric ID formatting failed.");
-                writer.WriteField(11, scratch.Slice(0, written));
-                scratch.Clear();
+                var bytes = new byte[256];
+                Span<FixWriterState> state = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, FixWriterState>(bytes);
+                NewOrderSingleWriter.InitializeState(state);
+                try { _ = new NewOrderSingleWriter(bytes, state, "ORD"u8); }
+                catch (ArgumentException ex) when (ex.ParamName == "state") { return "overlap"; }
+                return "accepted";
             }
         }
         """;
@@ -211,160 +545,92 @@ public class WriterContractTests
     private static readonly Lazy<Type> DriverType = new(() => TestSupport.EmitAndLoad(
         Sources(), "WriterContractAssembly").GetType("WriterContractDriver")!);
 
-    private static string[] Sources()
-    {
-        // Exercise identical values and capacity failures through the runtime's two prefix paths.
-        string prefixDriver = Driver.Replace("class WriterContractDriver", "class ConstantPrefixContractDriver")
-            .Replace("writer.WriteField(tag,",
-                """writer.WriteField(Encoding.ASCII.GetBytes(tag.ToString(System.Globalization.CultureInfo.InvariantCulture) + "="),""");
-        return TestSupport.Generate(TestSupport.BuildSampleDictionary(), out _)
-            .Select(f => f.content).Append(Driver).Append(prefixDriver).ToArray();
-    }
+    private static string[] Sources() =>
+        TestSupport.Generate(TestSupport.BuildSampleDictionary(), out _)
+            .Select(file => file.content).Append(Driver).ToArray();
 
     private static T Call<T>(string method, params object[] args) =>
         (T)DriverType.Value.GetMethod(method)!.Invoke(null, args)!;
 
-    private static string CallPrefix(int capacity, int tag, int kind) =>
-        (string)DriverType.Value.Assembly.GetType("ConstantPrefixContractDriver")!
-            .GetMethod("Field")!.Invoke(null, new object[] { capacity, tag, kind })!;
-
-    [Theory]
-    [InlineData(0, "-2147483648")]
-    [InlineData(1, "2147483647")]
-    [InlineData(2, "0")]
-    [InlineData(3, "-79228162514264337593543950335")]
-    [InlineData(4, "79228162514264337593543950335")]
-    [InlineData(5, "-0.0000000000000000000000000001")]
-    [InlineData(6, "123.4500")]
-    [InlineData(7, "Y")]
-    [InlineData(8, "N")]
-    [InlineData(9, "A")]
-    [InlineData(10, "ABC")]
-    [InlineData(11, "")]
-    [InlineData(12, "20240229-23:59:59.123")]
-    [InlineData(13, "00010101")]
-    [InlineData(14, "99991231")]
-    [InlineData(15, "23:59:59.999")]
-    [InlineData(16, "-9223372036854775808")]
-    [InlineData(17, "9223372036854775807")]
-    [InlineData(18, "-9.223372036854775808")]
-    [InlineData(19, "0.000000000000000000")]
-    public void EveryField_RejectsEveryTruncation_AndPoisonsWriter(int kind, string value)
+    [Fact]
+    public void RequiredAndOptionalValues_AreValidatedAndPoisonAllCopies()
     {
-        foreach (int tag in new[] { 1, 44, 123456, int.MaxValue })
-        {
-            string expected = tag.ToString(CultureInfo.InvariantCulture) + "=" + value + "\x01";
-            for (int capacity = 0; capacity < expected.Length; capacity++)
-            {
-                Assert.Equal("capacity", Call<string>("Field", capacity, tag, kind));
-                Assert.Equal("capacity", CallPrefix(capacity, tag, kind));
-            }
+        Assert.Equal("empty", Call<string>("EmptyRequired"));
+        Assert.Equal("poisoned", Call<string>("EmptyOptionalPoisons"));
+        Assert.Equal("poisoned", Call<string>("InvalidEnumPoisons"));
+        Assert.Equal("poisoned", Call<string>("InvalidRequiredScalePoisons"));
+    }
 
-            Assert.Equal(expected, Call<string>("Field", expected.Length, tag, kind));
-            Assert.Equal(expected, Call<string>("Field", expected.Length + 10, tag, kind));
-            Assert.Equal(expected, CallPrefix(expected.Length, tag, kind));
-            Assert.Equal(expected, CallPrefix(expected.Length + 10, tag, kind));
-        }
+    [Fact]
+    public void CopiedDefaultAndReusedHandles_CannotMutate()
+    {
+        Assert.Equal("stale", Call<string>("StaleCopies"));
+        Assert.Equal("default", Call<string>("DefaultHandle"));
+        Assert.Equal("safe", Call<string>("StateReuse"));
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void Envelope_RejectsEveryTruncation(bool generated)
+    public void ExpectedCount_RejectsShortfallAndExcess(bool excess)
     {
-        for (int capacity = 0; capacity < 24; capacity++)
-            Assert.Equal("capacity", Call<string>("Begin", capacity, generated));
-        Assert.Equal("ok", Call<string>("Begin", 24, generated));
+        Assert.Equal("poisoned", Call<string>("CountMismatch", excess));
     }
 
     [Fact]
-    public void GeneratedGroupCounter_RejectsTruncatedNumericValue_AndPoisonsWriter()
+    public void NestedGroups_PreserveOrderAndCountCompletedEntries()
     {
-        for (int remaining = 0; remaining < "78=2147483647\x01".Length; remaining++)
-            Assert.Equal("capacity", Call<string>("Group", remaining));
-        Assert.Equal("ok", Call<string>("Group", "78=2147483647\x01".Length));
+        string frame = Encoding.ASCII.GetString(Call<byte[]>("Complete", 512, true));
+        Assert.Contains("11=ORD\x01" + "55=SYM\x01" + "48=SEC\x01" + "54=1\x01" +
+            "38=0\x01" + "44=0\x01" + "78=1\x01" + "79=ACC\x01" + "80=0\x01" +
+            "756=1\x01" + "757=PARTY\x01", frame);
     }
 
-    [Theory]
-    [InlineData(9)]
-    [InlineData(10)]
-    [InlineData(99)]
-    [InlineData(100)]
-    [InlineData(999)]
-    [InlineData(1000)]
-    [InlineData(99999)]
-    [InlineData(100000)]
-    [InlineData(999999)]
-    [InlineData(1000000)]
-    public void Finish_AccountsForBodyLengthShiftAndChecksum_BeforeMutating(int bodyLength)
+    [Fact]
+    public void ExactCapacitySucceeds_AndEveryInsufficientCapacityFailsExplicitly()
     {
-        int digitCount = bodyLength.ToString(CultureInfo.InvariantCulture).Length;
-        int beforeFinishLength = 19 + bodyLength;
-        int finalLength = 20 + digitCount + bodyLength;
-        foreach (bool generated in new[] { false, true })
+        int exact = Call<byte[]>("Complete", 512, true).Length;
+        Assert.Equal("ok", Call<string>("Capacity", exact));
+        for (int capacity = 0; capacity < exact; capacity++)
         {
-            for (int capacity = beforeFinishLength; capacity < finalLength; capacity++)
-                Assert.Empty(Call<byte[]>("Frame", bodyLength, capacity, generated));
-            byte[] frame = Call<byte[]>("Frame", bodyLength, finalLength, generated);
-            Assert.Equal(finalLength, frame.Length);
-            AssertFrame(frame, "35=D\x01" + "11=" + new string('x', bodyLength - 9) + "\x01");
+            Assert.Equal("capacity", Call<string>("Capacity", capacity));
         }
     }
 
     [Fact]
-    public void StackInputs_AreAcceptedAndCopied_ThroughRefHelpersAndNestedGroups()
+    public void MetadataMustBeInitializedAndMustNotOverlapDestination()
     {
-        AssertFrame(Call<byte[]>("StackInputs", new byte[256]),
-            "35=D\x01" + "11=-9223372036854775808\x01" + "78=1\x01" +
-            "79=9223372036854775807\x01" + "756=1\x01" + "757=9223372036854775807\x01");
-        AssertFrame(Call<byte[]>("RuntimeStackInputs", new byte[256]),
-            "35=D\x01" + "11=-9223372036854775808\x01");
+        Assert.Equal("overlap", Call<string>("Overlap"));
     }
 
     [Fact]
     public void GeneratedRuntimeAndStackInputs_CompileWithCSharp11()
     {
-        var compilation = TestSupport.Compile(Sources());
         var parseOptions = new CSharpParseOptions(LanguageVersion.CSharp11);
-        compilation = compilation.RemoveAllSyntaxTrees().AddSyntaxTrees(
-            Sources().Select(source => CSharpSyntaxTree.ParseText(source, parseOptions)));
-        var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error);
-        Assert.Empty(errors);
+        var compilation = TestSupport.Compile(Sources())
+            .RemoveAllSyntaxTrees()
+            .AddSyntaxTrees(Sources().Select(source => CSharpSyntaxTree.ParseText(source, parseOptions)));
+        Assert.Empty(compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error));
     }
 
     [Fact]
-    public void DestinationLifetime_IsStillRetained()
+    public void MissingRequiredScopes_DoNotExposeFinish()
     {
-        const string invalidConsumer = """
-            using System;
+        const string invalid = """
             using Acme.Fix.V44;
             using Acme.Fix.V44.Runtime;
-            public static class InvalidDestinationLifetime
+            public static class Invalid
             {
-                public static NewOrderSingleWriter Message()
+                public static int Encode(byte[] destination, FixWriterState[] state)
                 {
-                    Span<byte> destination = stackalloc byte[256];
-                    return new NewOrderSingleWriter(destination);
-                }
-                public static FixSpanWriter Runtime()
-                {
-                    Span<byte> destination = stackalloc byte[256];
-                    return new FixSpanWriter(destination);
+                    NewOrderSingleWriter.InitializeState(state);
+                    var writer = new NewOrderSingleWriter(destination, state, "ORD"u8);
+                    return writer.Finish();
                 }
             }
             """;
-        var errors = TestSupport.Compile(Sources().Append(invalidConsumer)).GetDiagnostics()
+        var errors = TestSupport.Compile(Sources().Append(invalid)).GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
-        Assert.Equal(2, errors.Count(d => d.Id == "CS8352"));
-        Assert.Equal(2, errors.Count(d => d.Id == "CS8347"));
-    }
-
-    private static void AssertFrame(byte[] actual, string body)
-    {
-        string prefix = "8=FIX.4.4\x01" + "9=" +
-            body.Length.ToString(CultureInfo.InvariantCulture) + "\x01" + body;
-        int checksum = Encoding.ASCII.GetBytes(prefix).Sum(b => (int)b) & 0xFF;
-        Assert.Equal(Encoding.ASCII.GetBytes(prefix + "10=" +
-            checksum.ToString("D3", CultureInfo.InvariantCulture) + "\x01"), actual);
+        Assert.Contains(errors, error => error.Id == "CS1061");
     }
 }

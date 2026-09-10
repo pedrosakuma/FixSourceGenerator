@@ -36,9 +36,13 @@ public class TemporalWriterTests
             public static string Generated(DateTime value)
             {
                 var destination = new byte[128];
-                var writer = new NewOrderSingleWriter(destination);
-                writer.WriteTransactTime(value);
-                return Encoding.ASCII.GetString(destination.AsSpan(0, writer.Finish()));
+                Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+                NewOrderSingleWriter.InitializeState(state);
+                var message = new NewOrderSingleWriter(destination, state, "ORD"u8);
+                var instrument = message.BeginInstrument("SYM"u8);
+                var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 1m);
+                var complete = tail.SkipPrice().WriteTransactTime(value).SkipExecInst().SkipNoAllocs();
+                return Encoding.ASCII.GetString(destination.AsSpan(0, complete.Finish()));
             }
         }
         """;

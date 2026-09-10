@@ -39,7 +39,7 @@ namespace FixSourceGenerator.Generators
             }
 
             var readerEmitter = new ReaderEmitter(runtimeNs, context);
-            var writerEmitter = new WriterEmitter(runtimeNs);
+            var writerEmitter = new WriterEmitter(@namespace, runtimeNs, schema);
 
             foreach (var message in schema.Messages)
             {
@@ -55,6 +55,11 @@ namespace FixSourceGenerator.Generators
 
                 w.Close();
                 yield return ($"{@namespace}.{typeStem}.g.cs", w.ToString());
+            }
+
+            foreach (var writerSupport in writerEmitter.EmitSharedSources())
+            {
+                yield return writerSupport;
             }
         }
 
