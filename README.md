@@ -10,6 +10,10 @@ C# output shape, type mapping, versioning, diagnostics) and [`docs/USAGE.md`](do
 a getting-started guide, a worked example, and the schema-versioning guide. The tracking issue
 [#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) has the overall roadmap.
 
+**Unreleased API:** scoped writers intentionally break the flat writer API from 0.1.0.
+See [the migration guide](docs/MIGRATION.md). No new package version is implied by this branch.
+Ordinary consumers require net6+/C#11; optional `[FixView]` projections require net9+/C#13.
+
 ## Design highlights
 
 - **Allocation-minimal by default.** The generated API is a pair of `ref struct` reader/writer
@@ -22,6 +26,11 @@ a getting-started guide, a worked example, and the schema-versioning guide. The 
 - **Decode and encode.** The generator emits both a reader (parses a buffer into typed field
   access) and a writer (writes fields directly into a caller-supplied buffer, computing
   `BodyLength`/`CheckSum` via backpatch).
+- **Required inputs belong to their scope.** Constructors/factories require the next required
+  scalar run; component/group transitions preserve wire order. Groups use an upfront expected
+  count, and failed mutations invalidate the shared writer owner.
+- **Selective reading.** `[FixView]` supports messages, components and qualified group entries;
+  `CurrentSpan` feeds a projection without constructing the complete entry reader.
 - **Schema-driven, zero-lookup groups.** Group delimiter tags are known at compile time from the
   schema and embedded as constants in the generated code — no runtime dictionary lookup is
   needed to find group boundaries.
@@ -30,16 +39,17 @@ a getting-started guide, a worked example, and the schema-versioning guide. The 
 
 ## Quick start
 
-1. Reference the package and add your DataDictionary XML as an `AdditionalFiles` item:
+1. Run the [compiled example](examples/ScopedCodec), which uses the current source generator:
 
-   ```xml
-   <ItemGroup>
-     <PackageReference Include="FixSourceGenerator" Version="0.1.0" PrivateAssets="all" />
-     <AdditionalFiles Include="Schemas\FIX44.xml" />
-   </ItemGroup>
+   ```bash
+   dotnet restore examples/ScopedCodec --source https://api.nuget.org/v3/index.json
+   dotnet run --no-restore -c Release -f net6.0 --project examples/ScopedCodec
+   dotnet run --no-restore -c Release -f net9.0 --project examples/ScopedCodec
    ```
 
-2. Build. The generator produces a reader/writer per message in a namespace derived from your
+2. Add your dictionary as `AdditionalFiles` and reference the generator as an analyzer, as in
+   the [example project](examples/ScopedCodec/ScopedCodec.csproj).
+   The generator produces a reader/writer per message in a namespace derived from your
    project's `RootNamespace` (or the `FixGeneratorNamespace` property) plus a version token, e.g.
    `Acme.Fix.V44.NewOrderSingleReader` / `...NewOrderSingleWriter`.
 
@@ -47,34 +57,49 @@ a getting-started guide, a worked example, and the schema-versioning guide. The 
 
    ```csharp
    using Acme.Fix.V44;
+   using System.Text;
 
    var reader = new NewOrderSingleReader(buffer); // ReadOnlySpan<byte>
    string clOrdId = Encoding.ASCII.GetString(reader.ClOrdID);
    decimal? price = reader.Price;      // T? for optional value fields
-   foreach (var alloc in reader.NoAllocs)   // groups are enumerated, never materialized
+   foreach (var party in reader.NoPartyIDs) // groups are enumerated, never materialized
    {
-       decimal qty = alloc.AllocQty;
+       int? role = party.PartyRole;
    }
    ```
 
 4. Encode:
 
    ```csharp
+   using System;
+   using Acme.Fix.V44;
+   using Acme.Fix.V44.Runtime;
+
    Span<byte> destination = stackalloc byte[512];
    Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
    NewOrderSingleWriter.InitializeState(state);
-   var message = new NewOrderSingleWriter(destination, state, "ORD-1"u8);
+   var message = new NewOrderSingleWriter(destination, state, "SENDER"u8, "TARGET"u8, 7,
+       new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), "ORD-1"u8);
    var instrument = message.BeginInstrument("MSFT"u8);
-   var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
+   var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
    tail.SetPrice(101.25m);
-   int length = tail.SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
+   int length = tail.SkipNoPartyIDs().Finish();
    ```
+
+These snippets use the example's [mini dictionary](tests/FixSourceGenerator.Tests/TestData/FIX44-mini.xml),
+not the full FIX44 schema. Your dictionary determines the exact required arguments and phases.
 
 Optional-only tails support in-place `Set{Field}` calls: the current handle remains valid and
 older copies become stale. Fluent `Write`/`Skip` and scope transitions still consume their source.
+Omitted fields are distinct from zero/false, and explicit empty text is rejected by generated
+writers. Keep input buffers alive and unchanged while readers/views are in use.
 
-See [`docs/USAGE.md`](docs/USAGE.md) for the full worked example (including components and
-nested groups) and guidance on versioning schemas over time.
+Measured trade-offs, including small messages, combined codec loads, metadata and uncertainty,
+are recorded in the [benchmark results](benchmarks/FixSourceGenerator.Benchmarks/README.md);
+these are not transport latency guarantees.
+
+See [`docs/USAGE.md`](docs/USAGE.md) for the worked component/group example and guidance on
+versioning schemas over time.
 
 ## Repository layout
 
@@ -90,6 +115,8 @@ nested groups) and guidance on versioning schemas over time.
   latest recorded numbers).
 - `docs/CONTRACT.md` — the normative design contract for input schema and generated output.
 - `docs/USAGE.md` — getting-started guide, worked example, and schema-versioning guide.
+- `docs/MIGRATION.md` — breaking API changes, ownership rules and integration evidence.
+- `examples/ScopedCodec` — runnable net6/C#11 codec and net9/C#13 projected consumer.
 - `CHANGELOG.md` — release history.
 
 ## License

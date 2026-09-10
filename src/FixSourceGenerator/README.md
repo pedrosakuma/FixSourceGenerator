@@ -1,92 +1,57 @@
 # FIX Source Generator
 
-A Roslyn-based source generator that converts FIX tag=value DataDictionary XML schemas
-(the classic QuickFIX/QuickFIX-J/QuickFIX-n format) into allocation-minimal C# reader/writer
-types, in the spirit of [SbeSourceGenerator](https://github.com/pedrosakuma/SbeSourceGenerator)
-but for the tag=value wire format instead of Simple Binary Encoding.
+A Roslyn source generator for allocation-minimal C# readers and writers over FIX tag=value
+DataDictionary XML (QuickFIX format). Add your schema as `AdditionalFiles`; generated types
+live under `{RootNamespace}.Fix.V{version}`, or the root selected by `FixGeneratorNamespace`.
 
-See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the full design contract (input schema shape,
-C# output shape, type mapping, versioning, diagnostics) and [`docs/USAGE.md`](docs/USAGE.md) for
-a getting-started guide, a worked example, and the schema-versioning guide. The tracking issue
-[#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) has the overall roadmap.
+**Unreleased API:** scoped writers replace the flat writer API from 0.1.0. This source branch
+does not select or publish a new package version. See the
+[migration guide](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/MIGRATION.md)
+before upgrading.
 
-## Design highlights
+| Surface | Consumer requirement |
+|---------|----------------------|
+| Generated ordinary readers/writers | .NET 6+ and C# 11+ |
+| Optional `[FixView]` partial-property projections | .NET 9+ and C# 13+ |
+| Generator assembly | netstandard2.0, hosted by Roslyn |
 
-- **Allocation-minimal by default.** The generated API is a pair of `ref struct` reader/writer
-  types over `Span<byte>` / `ReadOnlySpan<byte>` (analogous to `System.Text.Json.Utf8JsonReader`/
-  `Utf8JsonWriter`), not heap-allocated DTOs. Strings are exposed as spans by default and only
-  materialize a `string` when the consumer explicitly asks for one.
-- **Repeating groups without materialization**, matching the same principle used by
-  SbeSourceGenerator: groups are exposed via `foreach`-style enumerators over the underlying
-  buffer, not `List<T>`.
-- **Decode and encode.** The generator emits both a reader (parses a buffer into typed field
-  access) and a writer (writes fields directly into a caller-supplied buffer, computing
-  `BodyLength`/`CheckSum` via backpatch).
-- **Schema-driven, zero-lookup groups.** Group delimiter tags are known at compile time from the
-  schema and embedded as constants in the generated code — no runtime dictionary lookup is
-  needed to find group boundaries.
-- **Namespace-isolated versioning**, so multiple FIX dictionary versions (e.g. 4.2 and 4.4) can
-  coexist in the same consumer project.
+Required scalar inputs are constructor/scope-transition arguments. Optional-only tails provide
+in-place `Set{Field}` methods; fluent `Write`/`Skip` and component/group transitions consume their
+source handle. Groups accept `expectedCount` and enforce completion; `Finish()` computes the
+envelope's BodyLength and CheckSum. Destination and typed metadata remain caller-owned.
 
-## Quick start
+Readers expose spans, lazy value parsing and group enumerators, not heap DTOs. `[FixView]`
+selects message/component/qualified-entry fields and can consume each group's `CurrentSpan`.
+Keep the original buffer alive and unchanged while any reader/view is in use. Readers are
+not complete protocol validators.
 
-1. Reference the package and add your DataDictionary XML as an `AdditionalFiles` item:
+## Example
 
-   ```xml
-   <ItemGroup>
-     <PackageReference Include="FixSourceGenerator" Version="0.1.0" PrivateAssets="all" />
-     <AdditionalFiles Include="Schemas\FIX44.xml" />
-   </ItemGroup>
-   ```
+This fragment uses the repository's mini FIX44 dictionary, not the full standard dictionary.
+The exact required arguments depend on the supplied XML.
 
-2. Build. The generator produces a reader/writer per message in a namespace derived from your
-   project's `RootNamespace` (or the `FixGeneratorNamespace` property) plus a version token, e.g.
-   `Acme.Fix.V44.NewOrderSingleReader` / `...NewOrderSingleWriter`.
+```csharp
+using System;
+using Acme.Fix.V44;
+using Acme.Fix.V44.Runtime;
 
-3. Decode:
+Span<byte> destination = stackalloc byte[512];
+Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
+NewOrderSingleWriter.InitializeState(state);
+var message = new NewOrderSingleWriter(destination, state, "SENDER"u8, "TARGET"u8, 7,
+    new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), "ORD-1"u8);
+var instrument = message.BeginInstrument("MSFT"u8);
+var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m, OrdType.Limit);
+tail.SetPrice(101.25m);
+int length = tail.SkipNoPartyIDs().Finish();
+```
 
-   ```csharp
-   using Acme.Fix.V44;
+An omitted value differs from explicit zero/false. Explicit empty text is rejected by generated
+writers. Failure invalidates the writer owner; discard partial output and never send it.
 
-   var reader = new NewOrderSingleReader(buffer); // ReadOnlySpan<byte>
-   string clOrdId = Encoding.ASCII.GetString(reader.ClOrdID);
-   decimal? price = reader.Price;      // T? for optional value fields
-   foreach (var alloc in reader.NoAllocs)   // groups are enumerated, never materialized
-   {
-       decimal qty = alloc.AllocQty;
-   }
-   ```
+- [Runnable example](https://github.com/pedrosakuma/FixSourceGenerator/tree/main/examples/ScopedCodec)
+- [Usage and installation](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/USAGE.md)
+- [Design contract](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/CONTRACT.md)
+- [Performance evidence and limitations](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/benchmarks/FixSourceGenerator.Benchmarks/README.md)
 
-4. Encode:
-
-   ```csharp
-   Span<byte> destination = stackalloc byte[512];
-   Span<FixWriterState> state = stackalloc FixWriterState[NewOrderSingleWriter.RequiredStateLength];
-   NewOrderSingleWriter.InitializeState(state);
-   var message = new NewOrderSingleWriter(destination, state, "ORD-1"u8);
-   var instrument = message.BeginInstrument("MSFT"u8);
-   var tail = instrument.SkipSecurityID().EndInstrument(Side.Buy, 100m);
-   tail.SetPrice(101.25m);
-   int length = tail.SkipTransactTime().SkipExecInst().SkipNoAllocs().Finish();
-   ```
-
-Optional-only tails support in-place `Set{Field}` calls: the current handle remains valid and
-older copies become stale. Fluent `Write`/`Skip` and scope transitions still consume their source.
-
-See [`docs/USAGE.md`](docs/USAGE.md) for the full worked example (including components and
-nested groups) and guidance on versioning schemas over time.
-
-## Repository layout
-
-- `src/FixSourceGenerator` — the Roslyn incremental source generator (`netstandard2.0`).
-  - `Schema/` — the parsed/resolved schema model (`SchemaReader` + `FixDictionary` and friends).
-  - `Generators/` — codegen for readers, writers, enums, components, and the embedded runtime.
-  - `Diff/` — `SchemaDiffer`, for comparing two dictionary versions and flagging breaking changes.
-- `tests/FixSourceGenerator.Tests` — unit, generator-driver, and real-schema conformance tests.
-- `docs/CONTRACT.md` — the normative design contract for input schema and generated output.
-- `docs/USAGE.md` — getting-started guide, worked example, and schema-versioning guide.
-- `CHANGELOG.md` — release history.
-
-## License
-
-MIT — see [`LICENSE.txt`](LICENSE.txt).
+MIT licensed.
