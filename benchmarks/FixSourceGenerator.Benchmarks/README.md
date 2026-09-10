@@ -30,11 +30,50 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
-### Scoped writer candidate (#31): resource and encoding regressions
+### Shared scoped writers (#31): memory blocker resolved, encoding cost remains
 
-This candidate is **not ready for merge**. Its structural safety checks currently increase
+Component/group definitions now produce shared generic templates parameterized by ordinary
+continuation marker structs. Marker-specific closure extensions preserve fluent parent returns
+without using ref structs as generic arguments or raising the net6/C#11 floor. The real full
+FIX44 and FIX50SP2 generation/compilation cases now both pass with the same **2 GiB managed
+heap limit** that rejected the initial scoped candidate.
+
+The full FIX50SP2 evidence contains 1,282 shared definition files, 1,948 shared writer ref-struct
+types and 7,461,436 bytes of shared template source. The X/W principal generated files are
+19,589/46,123 bytes; these small files must not be counted without the shared definitions and
+continuation support they use. No dictionary reduction was used.
+
+The runtime also shares cold validation/throw paths, consumes source handles by invalidating
+their generation, and validates successful mutations once rather than in each preceding guard.
+A mutation marks shared state failed and advances its generation **before** writing; only normal
+return restores active status. Thus any exception still poisons all handles, without per-field
+exception handlers blocking inlining. Invalid arguments on stale handles never poison the live owner.
+
+Latest serial measurements, using the same setup and baseline described below:
+
+| Encoding | Flat baseline, us | Initial scoped draft, us | Shared scopes mean (SD), us |
+|----------|------------------:|-------------------------:|----------------------------:|
+| Small NewOrderSingle, two parties | 0.453 | 1.017 | 0.967 (0.011) |
+| X, 10 entries | 3.282 | 8.246 | 7.654 (0.035) |
+| W, 10 entries | 3.096 | 7.508 | 6.909 (0.055) |
+| X, 50 entries | 15.829 | 39.574 | 36.089 (0.143) |
+| W, 50 entries | 15.037 | 33.724 | 30.083 (0.190) |
+
+No warmed managed allocation was reported. The latest means are lower than the initial draft,
+but short-run intervals overlap in some comparisons: this is not proof of a stable 5-11% gain.
+Encoding remains approximately **2.0-2.33x the recorded flat baseline**, so #39 remains draft
+pending the encoding-cost decision/optimization. The schema-memory blocker is resolved; the
+throughput trade-off is not. Earlier baseline numbers were not rerun in this iteration.
+
+Forcing inlining on generated optional-tail setters was also tried and rejected: its means
+were 0.971/7.994/7.147/37.445/30.942 us in table order, with no observed improvement over the
+retained version. Those extra generated annotations are not part of the candidate.
+
+### Initial scoped writer candidate (#31): historical regressions
+
+The initial candidate was **not ready for merge**. Its structural safety checks increased
 complete encoding time, and full FIX50SP2 generation/compilation has a memory regression.
-The older measurements below describe earlier implementations, not the scoped writer.
+The memory finding below describes the initial draft, before shared templates.
 
 Measured serially on AMD EPYC 7763 / Ubuntu 24.04, SDK 10.0.400, runtime 10.0.11,
 BenchmarkDotNet 0.15.8, Release; one launch, two warmups and three measured iterations.

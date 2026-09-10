@@ -9,6 +9,180 @@ namespace FixSourceGenerator.Tests;
 
 public class WriterContractTests
 {
+    [Fact]
+    public void Shared_scope_support_names_do_not_collide_with_FIX_definitions()
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="WriterScopes" msgtype="U1" msgcat="app">
+                  <field name="FixWriterContinuation1" required="Y"/>
+                  <component name="Detail" required="Y"/>
+                </message>
+              </messages>
+              <components>
+                <component name="Detail"><field name="FixWriterScopeExtensions" required="Y"/></component>
+              </components>
+              <fields>
+                <field number="1001" name="FixWriterContinuation1" type="CHAR">
+                  <value enum="1" description="ONE"/>
+                </field>
+                <field number="1002" name="FixWriterScopeExtensions" type="CHAR">
+                  <value enum="1" description="ONE"/>
+                </field>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "names.xml", _ => { });
+        Assert.NotNull(schema);
+        var sources = TestSupport.Generate(schema!, out var diagnostics).ToArray();
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(sources.Length, sources.Select(file => file.hintName).Distinct().Count());
+        const string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class NamingDriver
+            {
+                public static int Encode()
+                {
+                    Span<byte> destination = stackalloc byte[128];
+                    Span<FixWriterState> state = stackalloc FixWriterState[WriterScopesWriter.RequiredStateLength];
+                    WriterScopesWriter.InitializeState(state);
+                    var message = new WriterScopesWriter(destination, state, (FixWriterContinuation1)'1');
+                    return message.BeginDetail((FixWriterScopeExtensions)'1').EndDetail().Finish();
+                }
+            }
+            """;
+        var assembly = TestSupport.EmitAndLoad(sources.Select(file => file.content).Append(driver));
+        Assert.True((int)assembly.GetType("NamingDriver")!.GetMethod("Encode")!.Invoke(null, null)! > 0);
+    }
+
+    [Fact]
+    public void Shared_templates_preserve_nested_continuations_and_definition_identity()
+    {
+        const string xml = """
+            <fix type="FIX" major="4" minor="4" servicepack="0">
+              <header/><trailer/>
+              <messages>
+                <message name="FirstMessage" msgtype="U1" msgcat="app">
+                  <field name="FirstID" required="Y"/>
+                  <component name="Shared" required="Y"/>
+                  <field name="AfterShared" required="Y"/>
+                  <group name="NoRows" required="N"><field name="FirstRowID" required="Y"/></group>
+                </message>
+                <message name="SecondMessage" msgtype="U2" msgcat="app">
+                  <field name="SecondID" required="Y"/>
+                  <component name="Shared" required="Y"/>
+                  <field name="AfterShared" required="Y"/>
+                  <group name="NoRows" required="N"><field name="SecondRowID" required="Y"/></group>
+                </message>
+              </messages>
+              <components>
+                <component name="Shared">
+                  <field name="SharedID" required="Y"/>
+                  <component name="Inner" required="Y"/>
+                  <field name="AfterInner" required="Y"/>
+                  <field name="SharedText" required="N"/>
+                </component>
+                <component name="Inner"><field name="InnerID" required="Y"/></component>
+              </components>
+              <fields>
+                <field number="1000" name="FirstID" type="STRING"/>
+                <field number="1001" name="SecondID" type="STRING"/>
+                <field number="1002" name="SharedID" type="STRING"/>
+                <field number="1003" name="InnerID" type="STRING"/>
+                <field number="1004" name="AfterInner" type="INT"/>
+                <field number="1005" name="SharedText" type="STRING"/>
+                <field number="1006" name="AfterShared" type="INT"/>
+                <field number="1100" name="NoRows" type="NUMINGROUP"/>
+                <field number="1101" name="FirstRowID" type="STRING"/>
+                <field number="1102" name="SecondRowID" type="STRING"/>
+              </fields>
+            </fix>
+            """;
+        var schema = global::FixSourceGenerator.Schema.SchemaReader.Parse(xml, "shared-writers.xml", _ => { });
+        Assert.NotNull(schema);
+        var generated = TestSupport.Generate(schema!, out var diagnostics);
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Single(generated, file => file.hintName.Contains(".SharedWriterScope", StringComparison.Ordinal));
+        Assert.Equal(2, generated.Count(file => file.hintName.Contains(".NoRowsWriterGroup", StringComparison.Ordinal)));
+
+        string support = Assert.Single(
+            generated,
+            file => file.hintName.EndsWith(".WriterScopes.Support.g.cs", StringComparison.Ordinal)).content;
+        Assert.Contains("struct FixWriterContinuation", support);
+        Assert.Contains("<TOuter>", support);
+
+        string driver = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+
+            public static class SharedWriterDriver
+            {
+                public static string Run()
+                {
+                    Span<byte> firstDestination = stackalloc byte[256];
+                    Span<FixWriterState> firstState = stackalloc FixWriterState[FirstMessageWriter.RequiredStateLength];
+                    FirstMessageWriter.InitializeState(firstState);
+                    var first = new FirstMessageWriter(firstDestination, firstState, "A"u8);
+                    var sharedTerminal = first.BeginShared("S"u8)
+                        .BeginInner("I"u8)
+                        .EndInner(7)
+                        .SkipSharedText();
+                    var alias = sharedTerminal;
+                    var firstGroup = sharedTerminal.EndShared(8).BeginNoRows(1);
+                    try { _ = alias.EndShared(9); }
+                    catch (InvalidOperationException)
+                    {
+                        firstGroup = firstGroup.BeginEntry("R1"u8).EndEntry();
+                        _ = firstGroup.EndGroup().Finish();
+
+                        var secondDestination = new byte[256];
+                        var secondState = new FixWriterState[SecondMessageWriter.RequiredStateLength];
+                        SecondMessageWriter.InitializeState(secondState);
+                        var secondGroup = new SecondMessageWriter(secondDestination, secondState, "B"u8)
+                            .BeginShared("S2"u8)
+                            .BeginInner("I2"u8)
+                            .EndInner(10)
+                            .SkipSharedText()
+                            .EndShared(11)
+                            .BeginNoRows(1);
+                        secondGroup = secondGroup.BeginEntry("R2"u8).EndEntry();
+                        _ = secondGroup.EndGroup().Finish();
+                        return "shared";
+                    }
+                    return "alias-live";
+                }
+            }
+            """;
+        var sources = generated.Select(file => file.content).Append(driver).ToArray();
+        var assembly = TestSupport.EmitAndLoad(sources, "SharedWriterAssembly");
+        Assert.Equal("shared", assembly.GetType("SharedWriterDriver")!.GetMethod("Run")!.Invoke(null, null));
+
+        string missingInputs = """
+            using System;
+            using Acme.Fix.V44;
+            using Acme.Fix.V44.Runtime;
+            public static class MissingContinuationInputs
+            {
+                public static void Invalid()
+                {
+                    Span<byte> destination = stackalloc byte[256];
+                    Span<FixWriterState> state = stackalloc FixWriterState[FirstMessageWriter.RequiredStateLength];
+                    FirstMessageWriter.InitializeState(state);
+                    _ = new FirstMessageWriter(destination, state, "A"u8)
+                        .BeginShared("S"u8).BeginInner("I"u8).EndInner();
+                }
+            }
+            """;
+        Assert.Contains(
+            TestSupport.Compile(generated.Select(file => file.content).Append(missingInputs)).GetDiagnostics(),
+            diagnostic => diagnostic.Severity == DiagnosticSeverity.Error && diagnostic.Id == "CS7036");
+    }
+
     [Theory]
     [InlineData("WriteValue(7m)", "7")]
     [InlineData("WriteValue(7L)", "7")]

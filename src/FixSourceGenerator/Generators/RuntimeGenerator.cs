@@ -208,6 +208,7 @@ namespace __NS__.Runtime
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public readonly void Validate()
         {
             if (_state.IsEmpty ||
@@ -215,9 +216,13 @@ namespace __NS__.Runtime
                 _state[0].Status != 1 ||
                 _state[0].Generation != _generation)
             {
-                throw new InvalidOperationException(""The writer handle is default, stale, completed, or failed."");
+                ThrowInvalidHandle();
             }
         }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowInvalidHandle() =>
+            throw new InvalidOperationException(""The writer handle is default, stale, completed, or failed."");
 
         public void Poison()
         {
@@ -225,44 +230,101 @@ namespace __NS__.Runtime
             PoisonCore();
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateOrder(int currentOrder, int nextOrder)
+        {
+            if (currentOrder >= nextOrder)
+            {
+                // Successful paths validate in the following mutation; rejection must not poison a stale owner.
+                Validate();
+                ThrowInvalidOrder();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowInvalidOrder()
+        {
+            PoisonCore();
+            throw new InvalidOperationException(""A field or scope cannot be emitted twice or out of schema order."");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateText(scoped ReadOnlySpan<byte> value, string fieldName, string parameterName)
+        {
+            if (value.IsEmpty)
+            {
+                Validate();
+                ThrowEmptyText(fieldName, parameterName);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowEmptyText(string fieldName, string parameterName)
+        {
+            PoisonCore();
+            throw new ArgumentException(""An explicit "" + fieldName + "" value must not be empty."", parameterName);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal void ValidateCode(bool isValid, string parameterName)
+        {
+            if (!isValid)
+            {
+                Validate();
+                ThrowInvalidCode(parameterName);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowInvalidCode(string parameterName)
+        {
+            PoisonCore();
+            throw new ArgumentOutOfRangeException(parameterName);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, scoped ReadOnlySpan<byte> value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, int value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, long value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, long mantissa, int scale)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, mantissa, scale); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, mantissa, scale);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, decimal value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
         public void WriteField(scoped ReadOnlySpan<byte> prefix, FixDecimal value)
@@ -283,50 +345,63 @@ namespace __NS__.Runtime
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, bool value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, char value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, DateTime value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, DateOnly value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void WriteField(scoped ReadOnlySpan<byte> prefix, TimeOnly value)
         {
             PrepareMutation();
-            try { ValidateEntryDelimiter(prefix); _writer.WriteField(prefix, value); RenewCore(); }
-            catch (ArgumentException) { PoisonCore(); throw; }
-            catch (InvalidOperationException) { PoisonCore(); throw; }
+            ValidateEntryDelimiter(prefix);
+            _writer.WriteField(prefix, value);
+            _state[0].Status = 1;
         }
 
         public FixWriterContext Transfer()
         {
             Renew();
-            return this;
+            return Take();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal FixWriterContext Take()
+        {
+            var next = this;
+            _generation = 0;
+            return next;
         }
 
         public void BeginGroup(scoped ReadOnlySpan<byte> prefix, int expectedCount)
@@ -450,6 +525,9 @@ namespace __NS__.Runtime
         {
             Validate();
             EnsureCanRenew();
+            // A write is committed only on normal return; any exception leaves every handle poisoned.
+            _state[0].Status = -1;
+            RenewCore();
         }
 
         private void ValidateEntryDelimiter(scoped ReadOnlySpan<byte> prefix)
@@ -488,14 +566,21 @@ namespace __NS__.Runtime
             RenewCore();
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCanRenew()
         {
             if (_state[0].Generation == int.MaxValue)
             {
-                _state[0].Status = -1;
-                _generation = 0;
-                throw new InvalidOperationException(""The writer state generation is exhausted."");
+                ThrowGenerationExhausted();
             }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void ThrowGenerationExhausted()
+        {
+            _state[0].Status = -1;
+            _generation = 0;
+            throw new InvalidOperationException(""The writer state generation is exhausted."");
         }
 
         private void RenewCore()

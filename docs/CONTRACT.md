@@ -498,12 +498,27 @@ Para limitar explosão em schemas grandes, caudas somente opcionais compartilham
 o ordinal runtime descrito em §12.5. O compilador restringe as demais transições; validade dos
 valores, cópias e restrições não representadas nas fases exigem runtime.
 
-**Limitação de escala ainda aberta (#31):** a consolidação das caudas opcionais não elimina
-a duplicação de subescopos. Na comparação com heap gerenciado limitado a 2 GiB, o FIX44
-completo compila, mas o FIX50SP2 completo ainda esgota memória durante o parsing do código
-gerado pelo Roslyn; a base `68047d0` compila ambos sob o mesmo limite. Compilar sem esse limite
-não resolve a regressão de recursos. Esta implementação permanece candidata, não aprovada
-para merge, até reduzir o custo de geração/compilação dos dicionários completos.
+**Compartilhamento de schema:** cada definição de componente e cada definição distinta de grupo
+gera um template `ref struct` genérico uma única vez por schema. O argumento genérico é sempre
+um marker struct comum (nunca outro `ref struct`) que identifica a continuação concreta. Writers
+raiz continuam não genéricos; callsites dentro de templates usam markers genéricos no marker
+externo. `End{Component}`/`EndGroup` são extensions por valor em uma classe compartilhada:
+o marker do receiver seleciona o tipo pai, e `EndScope()` renova o epoch antes de devolver o
+contexto. Assim, expressões fluentes continuam válidas e a cópia usada pela extension invalida
+o receiver original e seus aliases. Grupos homônimos com estruturas diferentes preservam
+identidades/templates separados.
+
+Essa fatoração elimina a reemissão recursiva do mesmo grafo em cada mensagem/caminho.
+FIX44 e FIX50SP2 completos agora compilam sob o mesmo limite de heap gerenciado de 2 GiB que
+rejeitava o primeiro candidato; consumidores net6/C#11 continuam suportados. O custo de escrita
+completa ainda supera o writer flat anterior (ver benchmark README), portanto #39 permanece draft.
+
+O runtime invalida a geração do handle consumido, sem zerar todo o contexto. Antes de uma
+escrita, marca o estado compartilhado como falho e avança a geração; somente retorno normal
+restaura o estado ativo. Assim qualquer exceção propaga e mantém todos os handles envenenados,
+sem rollback nem handlers por campo. Guards válidos deixam a validação de ownership para a
+mutação seguinte; guards inválidos validam o handle antes de envenenar, preservando o dono ativo
+quando o uso incorreto veio de uma cópia obsoleta.
 
 ### 12.2 Omissão vs. zero vs. `false` vs. span vazio explícito
 
@@ -601,11 +616,10 @@ Alternativas honestas:
 | Tipos lineares/uniqueness futuros | Poderiam impedir cópia em compilação. | Não existem em C# atual; não são base para esta API. |
 
 O protótipo antigo por valor permanece no arquivo apenas para comparar wire order/backpatch; ele
-**não** prova poison-on-failure nem ownership seguro. O emitter futuro só deve integrar o shape
-escopado depois de escolher e aplicar um owner compartilhado equivalente em todas as fases,
-inclusive setters e grupos aninhados. Setters que mantêm a fase devem renovar o epoch do
-handle ativo e invalidar cópias anteriores; transições entregam o novo epoch a outro handle.
-Esses caminhos combinados ainda não estão implementados no spike seguro.
+**não** prova poison-on-failure nem ownership seguro. O emitter integrado usa
+`Span<FixWriterState>` tipado em todas as fases, inclusive setters e grupos aninhados. Setters
+renovam o epoch e invalidam cópias anteriores; transições entregam o novo epoch somente ao
+handle retornado. Os tipos `Proto*` não são templates para essa implementação.
 
 ### 12.5 Ordem no wire quando campos obrigatórios e opcionais se intercalam; lifetime de spans de entrada
 
