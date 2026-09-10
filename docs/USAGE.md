@@ -149,6 +149,10 @@ upfront expected count, `BeginEntry`/`EndEntry`, then `EndGroup`. Only completed
 The typed state span is bounded by maximum group nesting, must not overlap the destination, and
 must remain alive and exclusive until completion. `InitializeState` is idempotent after completion
 but rejects live ownership; it never resets the generation.
+Generations use a signed 64-bit counter because each field mutation or ownership transfer
+advances it, not just each message. Exhaustion still fails closed without wrapping or reviving
+stale handles. This changes the generated metadata layout; allocate typed `FixWriterState`
+elements using `RequiredStateLength`, never a hard-coded byte size.
 
 ### In-place writes in optional-only tails
 
