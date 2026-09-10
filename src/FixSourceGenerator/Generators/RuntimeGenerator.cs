@@ -981,6 +981,7 @@ namespace __NS__.Runtime
         private readonly ReadOnlySpan<int> _entryTags;
         private readonly int _delimiterTag;
         private readonly bool _binarySearch;
+        private readonly bool _bitmapEntryTags;
         private readonly FixNestedGroupSkipper? _nestedGroupSkipper;
         private int _position;
         private int _remaining;
@@ -991,12 +992,13 @@ namespace __NS__.Runtime
         {
         }
 
-        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags, FixNestedGroupSkipper? nestedGroupSkipper = null)
+        internal FixGroupEnumerator(ReadOnlySpan<byte> buffer, int counterTag, int delimiterTag, ReadOnlySpan<int> entryTags, bool sortedEntryTags, FixNestedGroupSkipper? nestedGroupSkipper = null, bool bitmapEntryTags = false)
         {
             _buffer = buffer;
             _entryTags = entryTags;
             _delimiterTag = delimiterTag;
             _binarySearch = sortedEntryTags && entryTags.Length > 16;
+            _bitmapEntryTags = bitmapEntryTags;
             _nestedGroupSkipper = nestedGroupSkipper;
             _current = default;
             _remaining = 0;
@@ -1078,6 +1080,11 @@ namespace __NS__.Runtime
         private readonly bool Contains(int tag)
         {
             var tags = _entryTags;
+            if (_bitmapEntryTags)
+            {
+                uint word = (uint)tag >> 5;
+                return word < (uint)tags.Length && (tags[(int)word] & (1 << (tag & 31))) != 0;
+            }
             if (_binarySearch)
             {
                 int low = 0;

@@ -371,6 +371,7 @@ namespace FixSourceGenerator.Generators
             int delimiterTag = FixEntryHelpers.GetDelimiterTag(groupRef.Entries);
             var entryTags = new List<int>(FixEntryHelpers.FlattenEntryTags(groupRef.Entries));
             entryTags.Sort();
+            int[]? entryTagBits = CreateEntryTagBitmap(entryTags);
             string r = $"{_runtimeNs}.FixSpanReader";
             var nestedGroups = new List<FixGroupRef>();
             GroupScopeEmitter.CollectMembers(groupRef.Entries, nestedGroups, new HashSet<int>());
@@ -381,7 +382,8 @@ namespace FixSourceGenerator.Generators
             w.Open($"public readonly ref struct {groupReaderType}");
             w.Line("private readonly global::System.ReadOnlySpan<byte> _buffer;");
             w.Line();
-            w.Line($"private static readonly int[] EntryTags = new int[] {{ {Join(entryTags)} }};");
+            string membership = entryTagBits == null ? "EntryTags" : "EntryTagBits";
+            w.Line($"private static readonly int[] {membership} = new int[] {{ {Join(entryTagBits ?? (IReadOnlyList<int>)entryTags)} }};");
             if (needsNestedBoundaries)
             {
                 var helperIds = new Dictionary<FixGroupRef, string>();
@@ -414,7 +416,8 @@ namespace FixSourceGenerator.Generators
             w.Line($"private {_runtimeNs}.FixGroupEnumerator _inner;");
             w.Line();
             string nestedSkipper = needsNestedBoundaries ? ", nestedGroupSkipper: NestedGroupSkipper" : string.Empty;
-            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, EntryTags, sortedEntryTags: true{nestedSkipper});");
+            string bitmapArgument = entryTagBits == null ? string.Empty : ", bitmapEntryTags: true";
+            w.Line($"public Enumerator(global::System.ReadOnlySpan<byte> buffer) => _inner = new {_runtimeNs}.FixGroupEnumerator(buffer, {counterTag}, {delimiterTag}, {membership}, sortedEntryTags: true{nestedSkipper}{bitmapArgument});");
             w.Line();
             w.Line($"public {entryReaderType} Current => new {entryReaderType}(_inner.Current);");
             w.Line();
@@ -432,6 +435,22 @@ namespace FixSourceGenerator.Generators
             EmitReader(w, entryReaderType, groupRef.Entries);
 
             w.Close();
+        }
+
+        private static int[]? CreateEntryTagBitmap(IReadOnlyList<int> tags)
+        {
+            if (tags.Count <= 16 || tags[0] < 0)
+                return null;
+
+            // Cap each bitmap at 8 KiB and never exceed the replaced integer-array payload.
+            int words = (tags[tags.Count - 1] >> 5) + 1;
+            if (words > 2048 || words > tags.Count)
+                return null;
+
+            var bits = new int[words];
+            foreach (int tag in tags)
+                bits[tag >> 5] |= 1 << (tag & 31);
+            return bits;
         }
 
         private static string Join(IReadOnlyList<int> tags)
