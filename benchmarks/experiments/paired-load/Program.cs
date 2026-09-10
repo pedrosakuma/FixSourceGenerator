@@ -3,6 +3,12 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
 
+if (args is ["--residual", var baselinePath, var candidatePath])
+{
+    ResidualMembershipProbe.Run(baselinePath, candidatePath);
+    return;
+}
+
 if (args.Length != 2)
     throw new ArgumentException("Usage: baseline-benchmark.dll experimental-benchmark.dll");
 var assemblies = args.Select(path => new VariantContext(path).LoadFromAssemblyPath(Path.GetFullPath(path))).ToArray();

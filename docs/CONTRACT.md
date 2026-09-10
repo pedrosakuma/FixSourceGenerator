@@ -473,6 +473,13 @@ quantidade declarada usando delimitador, membership e a topologia recursiva do s
 continuar o scan do pai. Counts negativos, curtos, excessivos ou sem delimitador encerram o scan
 com segurança; uma tag desconhecida fora da membership estabelece o limite normal do grupo.
 
+**Membership residual limitada (#33):** o enumerador gerado mantém busca linear até 16 tags.
+Acima disso, usa bitmap somente quando o payload, em palavras de 32 bits, não excede 8 KiB
+nem o tamanho do array de tags que substitui; conjuntos esparsos ou com tags altas usam busca
+binária. A decisão ocorre na geração, sem construir estruturas por mensagem/entrada e sem
+reter simultaneamente array de tags e bitmap. O construtor público que aceita tags não
+ordenadas mantém a semântica anterior. Delimitadores e helpers de topologia aninhada não mudam.
+
 **Helpers de skip compartilhados entre views (issue #32, follow-up de tamanho de IL):** o método
 que pula um grupo aninhado (`TrySkip{GroupId}`, acima) não é emitido como cópia privada dentro de
 cada `[FixView]` — ele é gerado **uma única vez por schema e por topologia de grupo** em um

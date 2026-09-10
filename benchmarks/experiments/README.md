@@ -32,6 +32,23 @@ correct generator. Use `--buildTimeout 300` for the full dictionary.
 
 ## Group membership (#33)
 
+For the post-projection decision, use the integrated binary baseline `835941c` and bounded
+bitmap policy `7db739c` (or `9249509`, which also updates the order/process fixtures). Build each benchmark project
+in its own worktree, then run:
+
+```bash
+dotnet run -c Release --project benchmarks/experiments/paired-load/PairedLoad.csproj -- \
+  --residual /absolute/binary/benchmark.dll /absolute/bitmap/benchmark.dll
+```
+
+This mode initializes and reports group metadata separately, then alternates full/projected
+reader, slicing and combined codec workloads. It accepts both generated representations.
+Only one membership array is retained per group by the bounded candidate; tags above the
+8 KiB bitmap budget or too sparse for a memory win fall back to the sorted array.
+
+The patches below are **archived pre-projection prototypes**, not the bounded implementation.
+Do not apply them on top of the current integrated runtime:
+
 Apply either `group-membership/hashset.patch` or `group-membership/bitmap.patch` to its own
 clean worktree, then run:
 

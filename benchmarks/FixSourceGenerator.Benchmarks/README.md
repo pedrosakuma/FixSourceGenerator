@@ -30,6 +30,99 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
+### Residual membership after selective readers (#33)
+
+Compared the integrated `835941c` binary-search baseline with bounded bitmap policy `7db739c`,
+without changing writer, projection, selected fields or temporal parsing. The adopted policy
+is generated once per group: keep linear lookup through 16 tags; above that, use a 32-bit-word
+bitmap only if its payload is at most **8 KiB** and no larger than the replaced sorted int
+array. Otherwise keep binary search, including sparse/high custom tags. A bitmap replaces
+the integer tag array rather than retaining both. The existing public unsorted constructor
+and nested-group/delimiter behavior are unchanged; no per-message lookup allocation is added.
+
+The residual cost is still material after projection. An alternating same-process comparison
+of separate assembly load contexts used eight 200 ms blocks per variant/case, reversing
+execution order each round after 500 ms warmup per action. It covered all seven combined
+scenarios plus X/W reader-only and slicing paths at 1/10/50 entries. Median block times:
+
+| Work, 50 entries | Binary, us | Bounded bitmap, us | Reduction |
+|------------------|-----------:|------------------:|----------:|
+| X slicing only | 12.179 | 5.978 | 51% |
+| W slicing only | 7.911 | 5.313 | 33% |
+| X projected decode/consume | 34.833 | 29.079 | 17% |
+| W projected decode/consume | 27.718 | 23.310 | 16% |
+| X in-place encode + projected decode/consume | 62.014 | 54.314 | 12% |
+| W in-place encode + projected decode/consume | 52.109 | 49.017 | 6% |
+
+Small combined medians were 1.547/1.494 us fluent/full and 1.415/1.403 us in-place/projected;
+these small differences are not a claim of improvement for tiny groups, which keep linear
+lookup. All 32 paired cases reported zero measured load-thread bytes.
+
+Separate BDN runs used two launches, three warmups and seven iterations per launch:
+
+| Combined work | Binary mean (SD), us | Bitmap mean (SD), us |
+|---------------|---------------------:|--------------------:|
+| W/50 fluent/full | 70.09 (1.865) | 70.53 (4.490) |
+| W/50 in-place/projected | 51.18 (1.187) | 47.30 (1.641) |
+| X/50 fluent/full | 88.37 (2.995) | 82.08 (3.035) |
+| X/50 in-place/projected | 82.38 (24.015), rejected as noisy | 54.69 (2.082) |
+
+The noisy binary X/50 result was repeated with two launches, five warmups and ten iterations:
+fluent/full **90.86 (1.404) us**, in-place/projected **63.20 (2.923) us**.
+The stable repeat supports roughly 13% less time for bitmap on the projected combined path;
+do not use the noisy 82.38 us baseline to inflate that estimate. W fluent/full showed no
+reliable improvement. Sequential BDN runs can drift on this shared host; paired results
+support the direction but neither experiment is a production latency guarantee.
+All these BDN cases reported no managed allocation. Host/runtime match the integration
+results below: EPYC 7763, Ubuntu 24.04, .NET 10.0.11, SDK 10.0.400, BDN 0.15.8, Release.
+
+#### Metadata and code costs, separately measured
+
+The probe explicitly initializes all 1,066 generated group types in the benchmark assembly
+(full FIX50SP2 plus mini FIX44). Only 31 groups qualify for bitmap:
+
+| Metric | Binary | Bounded bitmap |
+|--------|-------:|---------------:|
+| Retained membership arrays | 1,066 | 1,066 |
+| Retained array payload bytes | 502,428 | 309,568 |
+| Managed bytes during group type initialization | 585,720 | 376,496 |
+| X outer-group payload bytes | 16,132 | 5,392 |
+| W outer-group payload bytes | 552 | 372 |
+| Group initializer IL bytes | 25,631 | 25,607 |
+| Complete generated source bytes (2,687 files) | 31,291,055 | 30,872,843 |
+| Benchmark assembly bytes | 11,666,432 | 11,508,736 |
+
+Array payload drops **38%** across these generated groups, not across the whole application.
+Payload excludes object headers and delegates; the separate initialization allocation window
+includes runtime initialization overhead and any nested-skip delegates. Neither is a
+whole-process retained-memory measurement. W uses 32-bit words rather than the archived
+64-bit-word prototype's 376-byte payload.
+The assembly-size comparison predates fixture-adapter correction `9249509`; that correction
+adds 512 bytes to the bitmap assembly without changing the measured codec methods or metadata.
+It aligns older order/process projections with W LastUpdateTime and makes their metadata
+adapter understand either representation. W process fixtures now consume 2 + 4N temporal
+values, rather than the historical 1 + 4N.
+
+A separate JIT diagnostic (`DOTNET_TieredCompilation=0`,
+`DOTNET_JitDisasm='*FixGroupEnumerator:*'`, `--combined-check`) reported FullOpts native sizes
+for each schema runtime: constructor **273 -> 282 bytes**, `MoveNext` **418 -> 418 bytes**,
+`Contains` **118 -> 143 bytes**. This is a small native-code increase, not eliminated lookup
+cost. Those diagnostic settings were not used for timed runs and do not describe tiered-PGO
+code sizes.
+
+Adoption is based on projected/combined work and lower metadata, not slicing alone. HashSet
+was not rerun: earlier representative full-reader evidence did not justify its additional
+retained structure, and the bounded candidate already improves the relevant projected path.
+Sparse/high-tag fallback remains deliberately conservative.
+
+```bash
+dotnet run -c Release --project benchmarks/experiments/paired-load/PairedLoad.csproj -- \
+  --residual /absolute/binary/benchmark.dll /absolute/bitmap/benchmark.dll
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*CombinedCodecBenchmarks*50*' \
+  --launchCount 2 --warmupCount 3 --iterationCount 7 --buildTimeout 600
+```
+
 ### Integrated encoding, projected decoding and persistent-state load (#34)
 
 This integration combines writer `e116023` and reader `f6a3e21` (local merge `589d29c`),
@@ -524,7 +617,7 @@ while bounding an entry. The full dictionary contains 4,033 possible tags for X'
 entries versus 138 for W's `MDFullGrp`; these are schema possibilities, not fields present in
 each encoded entry.
 
-Generated membership arrays are now sorted at generation time. The generated-only runtime path
+At this historical baseline, membership arrays were sorted at generation time. The generated-only runtime path
 uses binary search above 16 tags, retaining linear lookup for small sets. The public four-argument
 `FixGroupEnumerator` constructor continues to support arbitrary, unsorted tag lists. Delimiters
 are still derived from schema order before sorting, and membership remains specific to each group.
@@ -610,7 +703,7 @@ HashSet consistently reduced X delimitation time versus binary search, but did n
 a consistent full-X decoding improvement. Bitmap had the lowest delimitation means for both
 groups in both passes. Full decoding improvements were much smaller, with other work remaining
 in scanning, reader construction and value conversion; bitmap did not beat HashSet on every
-full-decoding measurement. The production implementation remains binary search pending an
+full-decoding measurement. At that stage, the implementation retained binary search pending an
 adoption decision; the alternatives were measured only in isolated experimental copies.
 
 A bitmap's payload alone is 5,392 bytes for X and 376 bytes for W, versus 16,132/552 bytes for
