@@ -84,7 +84,7 @@ namespace __NS__.Runtime
 
         internal int Marker;
         internal int Status;
-        internal int Generation;
+        internal long Generation;
         internal int ExpectedCount;
         internal int ActualCount;
         internal int EntryActive;
@@ -132,7 +132,7 @@ namespace __NS__.Runtime
     {
         private Span<FixWriterState> _state;
         private FixSpanWriter _writer;
-        private int _generation;
+        private long _generation;
         private int _groupDepth;
 
         public static FixWriterContext Begin(
@@ -166,7 +166,7 @@ namespace __NS__.Runtime
             {
                 throw new InvalidOperationException(""The writer state is already owned by a live message."");
             }
-            if (root.Generation == int.MaxValue)
+            if (root.Generation == long.MaxValue)
             {
                 throw new InvalidOperationException(""The writer state generation is exhausted."");
             }
@@ -569,7 +569,7 @@ namespace __NS__.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCanRenew()
         {
-            if (_state[0].Generation == int.MaxValue)
+            if (_state[0].Generation == long.MaxValue)
             {
                 ThrowGenerationExhausted();
             }
@@ -594,7 +594,7 @@ namespace __NS__.Runtime
             if (!_state.IsEmpty)
             {
                 _state[0].Status = -1;
-                if (_state[0].Generation != int.MaxValue)
+                if (_state[0].Generation != long.MaxValue)
                 {
                     _state[0].Generation++;
                 }

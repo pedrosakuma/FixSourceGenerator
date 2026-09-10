@@ -8,6 +8,68 @@ public class WriterMutationTests
     private static readonly string Runtime = TestSupport.Generate(TestSupport.BuildSampleDictionary(), out _)
         .Single(file => file.hintName.EndsWith(".Runtime.FixRuntime.g.cs", StringComparison.Ordinal)).content;
 
+    [Fact]
+    public void Generation_exhaustion_still_fails_closed_without_wrapping()
+    {
+        const string driver = """
+            using System;
+            using Acme.Fix.V44.Runtime;
+            public static class Driver
+            {
+                public static bool Run()
+                {
+                    Span<FixWriterState> state = stackalloc FixWriterState[1];
+                    FixWriterState.Initialize(state);
+                    state[0].Generation = long.MaxValue - 2;
+                    var context = FixWriterContext.Begin(new byte[128], state, 1, "FIX.4.4"u8, "D"u8);
+                    var copy = context;
+                    context.WriteField("1="u8, 1);
+                    try { context.WriteField("2="u8, 2); return false; }
+                    catch (InvalidOperationException) { }
+                    try { copy.Validate(); return false; }
+                    catch (InvalidOperationException) { }
+                    try { _ = context.Finish(); return false; }
+                    catch (InvalidOperationException) { }
+                    FixWriterState.Initialize(state);
+                    try { _ = FixWriterContext.Begin(new byte[128], state, 1, "FIX.4.4"u8, "D"u8); return false; }
+                    catch (InvalidOperationException) { }
+                    return state[0].Generation == long.MaxValue && state[0].Status == -1;
+                }
+            }
+            """;
+        var assembly = TestSupport.EmitAndLoad(new[] { Runtime, driver });
+        Assert.True((bool)assembly.GetType("Driver")!.GetMethod("Run")!.Invoke(null, null)!);
+    }
+
+    [Fact]
+    public void Reused_metadata_crosses_the_32_bit_generation_boundary()
+    {
+        const string driver = """
+            using System;
+            using Acme.Fix.V44.Runtime;
+            public static class Driver
+            {
+                public static bool Run()
+                {
+                    Span<FixWriterState> state = stackalloc FixWriterState[1];
+                    FixWriterState.Initialize(state);
+                    state[0].Generation = int.MaxValue - 1;
+                    var context = FixWriterContext.Begin(new byte[128], state, 1, "FIX.4.4"u8, "D"u8);
+                    var copy = context;
+                    context.WriteField("1="u8, 1);
+                    try { copy.Validate(); return false; }
+                    catch (InvalidOperationException) { }
+                    _ = context.Finish();
+                    var next = FixWriterContext.Begin(new byte[128], state, 1, "FIX.4.4"u8, "D"u8);
+                    next.WriteField("1="u8, 2);
+                    return next.Finish() > 0 && state[0].Generation > int.MaxValue;
+                }
+            }
+            """;
+        var assembly = TestSupport.EmitAndLoad(new[] { Runtime, driver });
+        Assert.True((bool)assembly.GetType("Driver")!.GetMethod("Run")!.Invoke(null, null)!);
+    }
+
     [Theory]
     [InlineData("\"x\"u8", 27, "ArgumentException")]
     [InlineData("1", 27, "ArgumentException")]
