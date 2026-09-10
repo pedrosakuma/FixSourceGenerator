@@ -100,6 +100,13 @@ public class MarketDataWriterBenchmarks
 
     internal int WriteInPlace(bool snapshot) => snapshot ? WriteW(true, true) : WriteX(true, true);
 
+    internal int WriteCombined(bool snapshot, bool inPlace, Span<FixWriterState> state) =>
+        snapshot ? WriteW(true, inPlace, state) : WriteX(true, inPlace, state);
+
+    internal ReadOnlySpan<byte> WrittenFrame(int length) => _destination.AsSpan(0, length);
+
+    internal void SetPriceOffset(int offset) => _price = 123456700 + offset;
+
     internal int WriteRaw(bool snapshot)
     {
         var writer = new FixSpanWriter(_destination);
@@ -196,6 +203,11 @@ public class MarketDataWriterBenchmarks
     {
         Span<FixWriterState> state = stackalloc FixWriterState[MarketDataIncrementalRefreshWriter.RequiredStateLength];
         MarketDataIncrementalRefreshWriter.InitializeState(state);
+        return WriteX(scaled, inPlace, state);
+    }
+
+    private int WriteX(bool scaled, bool inPlace, Span<FixWriterState> state)
+    {
         var writer = new MarketDataIncrementalRefreshWriter(_destination, state);
         var component = writer
             .SkipApplicationSequenceControl()
@@ -269,6 +281,11 @@ public class MarketDataWriterBenchmarks
     {
         Span<FixWriterState> state = stackalloc FixWriterState[MarketDataSnapshotFullRefreshWriter.RequiredStateLength];
         MarketDataSnapshotFullRefreshWriter.InitializeState(state);
+        return WriteW(scaled, inPlace, state);
+    }
+
+    private int WriteW(bool scaled, bool inPlace, Span<FixWriterState> state)
+    {
         var writer = new MarketDataSnapshotFullRefreshWriter(_destination, state);
         var instrument = writer
             .SkipApplicationSequenceControl()

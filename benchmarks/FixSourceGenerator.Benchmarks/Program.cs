@@ -14,6 +14,14 @@ else if (args is ["--writer-pipeline-check"])
             new WriterPipelineBenchmarks { Entries = entries, Message = message }.Setup();
     Console.WriteLine("Raw, checked-context, scoped and in-place writer frames agree for X/W at 1/10/50 entries.");
 }
+else if (args is ["--combined-check"])
+{
+    CombinedCodecLoad.Check();
+}
+else if (args is ["--combined-load", var scenario, var seconds, var mode])
+{
+    CombinedCodecLoad.Run(scenario, seconds, mode);
+}
 else if (args is ["--reader-order-check"])
 {
     foreach (int entries in new[] { 1, 10, 50 })

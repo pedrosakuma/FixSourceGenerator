@@ -30,6 +30,91 @@ which is much slower and dominates total run time).
 
 ## Latest recorded numbers
 
+### Integrated encoding, projected decoding and persistent-state load (#34)
+
+This integration combines writer `e116023` and reader `f6a3e21` (local merge `589d29c`),
+plus the 64-bit writer-generation correction described below. `CombinedCodecBenchmarks`
+measures **encode -> decode -> consume** in one operation, rather than adding independent
+microbenchmark means. Both paths reuse destination and typed writer metadata, initialized
+once. Prices vary each operation; the consumed digest must match its exact expected delta.
+Setup also compares fluent/in-place frames byte-for-byte and full/projected digests.
+
+`FluentFull` uses fluent writing and full readers; `InPlaceProjected` uses optional-tail
+setters and generated projections. Both consume the same selected fields. Small is the
+FIX44 mini NewOrderSingle routing subset (ClOrdID length, Price and party roles); X/W use
+the real full FIX50SP2 schema with 1/10/50 entries. W now also consumes its required
+LastUpdateTime on both paths, so its workload differs from earlier reader-only numbers.
+This is codec work, not network transport, session management or FIXT composition.
+
+One launch, three warmups and five measured iterations per case, run serially without
+concurrent local builds or loads; EPYC 7763, Ubuntu 24.04, SDK 10.0.400, .NET 10.0.11,
+BDN 0.15.8, Release:
+
+| Scenario | Fluent/full mean (SD), us | In-place/projected mean (SD), us | Mean reduction |
+|----------|-------------------------:|--------------------------------:|---------------:|
+| Small | 1.506 (0.0225) | 1.360 (0.0123) | 10% |
+| W/1 | 3.166 (0.0143) | 2.500 (0.0466) | 21% |
+| W/10 | 15.898 (0.1346) | 11.513 (0.5422) | 28% |
+| W/50 | 70.334 (1.0591) | 50.780 (1.8006) | 28% |
+| X/1 | 2.727 (0.0626) | 2.038 (0.0476) | 25% |
+| X/10 | 18.901 (1.0400) | 13.447 (0.5733) | 29% |
+| X/50 | 91.052 (2.3129) | 61.232 (1.1134) | 33% |
+
+These are exploratory estimates with small iteration counts and BDN outlier removal.
+For example, the X/50 99.9% confidence-interval half-widths are 14.946/7.195 us.
+BDN reported 2 B/op for fluent/full X/50 and no allocation for the other cases; the source
+of that isolated small allocation is not established. All standalone warmed load windows
+below reported zero current-thread managed bytes. Do not claim universal zero allocation
+or extrapolate these ratios to arbitrary projections.
+
+#### Long-lived metadata exposed a real exhaustion bug
+
+A sustained projected X/50 run with 32-bit generations failed after **2,626,151 measured
+messages**, reaching generation **2,147,483,647**. Generation advances per field/transition,
+not just per message. Both shared state and handle generations now use `long`; overflow
+still fails closed, never resets/wraps to revive stale aliases. Boundary regressions cover
+crossing the old limit and refusing 64-bit wrap. The generated metadata layout grows;
+consumers must use typed state allocation rather than assume a fixed byte size.
+
+The corrected, uninstrumented 240-second X/50 projected run completed **3,904,768 messages**
+at **16,269.7 ops/s**, reaching generation **3,189,028,150**, beyond the old limit.
+Sampled p50/p95/p99 were **55.9/87.8/124.7 us**, with 61,012 retained samples and zero
+current-thread managed bytes during the measurement window.
+
+Separate serial 10-second load windows:
+
+| Scenario | Full ops/s | Projected ops/s | Full p50/p95/p99, us | Projected p50/p95/p99, us |
+|----------|-----------:|----------------:|--------------------:|-------------------------:|
+| Small | 649790 | 744419 | 1.4 / 2.2 / 2.7 | 1.3 / 1.8 / 2.3 |
+| X/1 | 368465 | 498373 | 2.5 / 3.8 / 4.7 | 1.9 / 2.8 / 3.5 |
+| X/10 | 56856 | 78657 | 16.2 / 24.9 / 43.8 | 11.8 / 17.7 / 33.7 |
+| X/50 | 11432 | 16918 | 80.9 / 119.4 / 155.7 | 55.4 / 83.8 / 118.6 |
+| W/1 | 319280 | 408674 | 3.0 / 4.3 / 5.3 | 2.3 / 3.2 / 4.0 |
+| W/10 | 66918 | 84848 | 13.9 / 21.3 / 39.8 | 10.8 / 16.5 / 34.3 |
+| W/50 | 14442 | 20656 | 63.8 / 98.6 / 141.0 | 44.5 / 70.4 / 104.2 |
+
+The load is single-threaded, closed-loop, warmed for one second, sampling every 64th
+operation into a bounded 65,536-sample rolling buffer. Percentiles use nearest rank and
+describe the trailing sampled window when the buffer wraps. Fixed-interval sampling can
+alias periodic behavior; these are not open-loop latency/SLA estimates. Allocation excludes
+setup, warmup, sample storage and reporting. Prices cycle through 1,024 offsets.
+The initial failing run had a separate 10-second managed sampled-thread-time trace;
+none of the performance numbers above came from that traced run.
+
+```bash
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --combined-check
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*CombinedCodecBenchmarks*' \
+  --launchCount 1 --warmupCount 3 --iterationCount 5 --buildTimeout 600
+dotnet run -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --combined-load X50 240 projected
+```
+
+Load scenarios: `Small`, `X1`, `X10`, `X50`, `W1`, `W10`, `W50`; modes: `full`, `projected`;
+duration: 1-600 seconds. `--combined-check` is also exercised in CI. The integrated suite
+contains 262 passing cases, including full FIX44/FIX50SP2 generation and compilation under
+a 2 GiB managed-heap cap; the ordinary-consumer net6/C#11 compatibility build also passes.
+
 ### Same-build writer pipeline investigation and in-place setters (#31)
 
 `WriterPipelineBenchmarks` compares identical X/W frames in one binary:

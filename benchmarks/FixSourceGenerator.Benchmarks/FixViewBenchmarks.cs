@@ -68,9 +68,11 @@ public class FixViewBenchmarks
     /// <summary>Baseline: the full reader iterating the group, same access pattern as the view below.</summary>
     [Benchmark]
     [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
-    public decimal Decode_FullReader_TwoFields_PlusGroup()
+    public decimal Decode_FullReader_TwoFields_PlusGroup() => DecodeFull(Wire);
+
+    internal static decimal DecodeFull(ReadOnlySpan<byte> buffer)
     {
-        var reader = new NewOrderSingleReader(Wire);
+        var reader = new NewOrderSingleReader(buffer);
         decimal total = reader.ClOrdID.Length;
         total += reader.Price ?? 0m;
         foreach (var party in reader.NoPartyIDs)
@@ -87,9 +89,11 @@ public class FixViewBenchmarks
     /// </summary>
     [Benchmark]
     [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
-    public decimal Decode_FixView_TwoFields_PlusGroup()
+    public decimal Decode_FixView_TwoFields_PlusGroup() => DecodeProjected(Wire);
+
+    internal static decimal DecodeProjected(ReadOnlySpan<byte> buffer)
     {
-        var view = new OrderRoutingWithPartiesView(Wire);
+        var view = new OrderRoutingWithPartiesView(buffer);
         decimal total = view.ClOrdID.Length;
         total += view.Price ?? 0m;
         foreach (var party in view.NoPartyIDs)
