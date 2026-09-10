@@ -57,3 +57,4 @@ jobs:
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-check
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --combined-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --design-check

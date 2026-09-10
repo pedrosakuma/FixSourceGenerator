@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic topology fixture, not a standard FIX dictionary. -->
+<fix type="FIX" major="4" minor="3" servicepack="0">
+  <header />
+  <trailer />
+  <messages>
+    <message name="DesignEnvelope" msgtype="UDE" msgcat="app">
+      <group name="NoEntries" required="Y">
+        <field name="EntryID" required="Y" />
+        <field name="MDEntryPx" required="N" />
+        <field name="MDEntrySize" required="N" />
+        <group name="NoChildren" required="N">
+          <field name="EntryID" required="Y" />
+          <field name="MDEntryPx" required="N" />
+          <field name="MDEntrySize" required="N" />
+          <group name="NoGrandChildren" required="N">
+            <field name="EntryID" required="Y" />
+            <field name="MDEntryPx" required="N" />
+            <field name="MDEntrySize" required="N" />
+          </group>
+        </group>
+      </group>
+    </message>
+  </messages>
+  <components />
+  <fields>
+    <field number="100" name="NoEntries" type="NUMINGROUP" />
+    <field number="101" name="EntryID" type="STRING" />
+    <field number="200" name="NoChildren" type="NUMINGROUP" />
+    <field number="300" name="NoGrandChildren" type="NUMINGROUP" />
+    <field number="270" name="MDEntryPx" type="PRICE" />
+    <field number="271" name="MDEntrySize" type="QTY" />
+  </fields>
+</fix>

@@ -1,7 +1,23 @@
 using BenchmarkDotNet.Running;
 using FixSourceGenerator.Benchmarks;
 
-if (args is ["--writer-codegen"])
+if (args is ["--design-check"])
+{
+    DesignExperiments.Check();
+}
+else if (args is ["--design-load", var designKind])
+{
+    DesignExperiments.Load(designKind);
+}
+else if (args is ["--design-tail"])
+{
+    DesignExperiments.Tail();
+}
+else if (args is ["--design-edit-positions"])
+{
+    DesignExperiments.Positions();
+}
+else if (args is ["--writer-codegen"])
 {
     var writer = new MarketDataWriterBenchmarks { Entries = 10 };
     writer.CheckEquivalentFrames();
