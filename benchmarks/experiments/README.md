@@ -1,4 +1,45 @@
-# Reproducing the reader experiments
+# Codec experiments: conclusions and reproduction
+
+## Consolidation (2026-09-10)
+
+The design exploration is recorded here rather than promoted into a new production API.
+The recommended starting pattern for immediate transformation is the **existing reader,
+cached scalar locals and borrowed text, followed by the existing typed writer into a
+separate destination**. It is a usage recommendation, not a universal performance claim.
+
+| Question explored | Evidence commit | Conclusion retained |
+|-------------------|-----------------|---------------------|
+| Fuse projection/entry scanning; shift each edit or rebuild once? | `ff88237` | Narrow fused reads helped some grouped fixtures and regressed Small. Early variable-width edits favored rebuilding, with indexing and edit position materially affecting the result. |
+| Own native values with presence/dirty masks? | `55a0173` | DTOs provide independence from the input, but graph/string acquisition matters. No read advantage over cached locals was demonstrated for Small/X50 through 64 uses. Missing fields still occupy native slots. |
+| Feed the existing writer directly from borrowed readers? | `048187b` | Controlled full UND transforms without filtering benefited in time and allocation; count-prepass filtering traded zero allocation for extra traversal/conversion. |
+| Generate eager projections and enumeration from declarations? | `de0c353` | Actual generation is viable for the supported flat scopes. No consistent full-pipeline advantage was demonstrated; host variation was severe. Unsupported topology is rejected, not silently approximated. |
+
+All original reports, reproduction commands, source prototypes and generated
+[measurement artifacts](codec-design-results/) remain below/in this branch, including noisy
+runs. Native DTO acquisition, resident-only operations, full-frame transforms and narrow
+projections are different workloads; their times must not be combined into a single ranking.
+
+The [runnable transformation](../../examples/ScopedCodec/TransformationExample.cs) now demonstrates
+the recommended pattern using only the production readers/writers and the existing mini FIX44
+dictionary. It routes a NewOrderSingle with a new identifier/header, adjusts only a present price,
+preserves known component/party fields, and optionally filters parties with an explicit count
+pass. It has no reference to the experimental eager analyzer or DTO prototypes. See
+[the migration guide](../../docs/MIGRATION.md#direct-transformation-example) for lifetime,
+normalization, validation prerequisites and runnable commands.
+
+**Not adopted:** a generated owned-DTO API, change-tracking API, mutable-wire setters, eager
+reader replacement, group-count backpatching or a new encoder. Applications needing long-lived
+state can still explicitly materialize the values they own; the experimental DTO is not a
+released facility. No merge or package publication follows from these measurements.
+
+Further eager work is gated on a bounded confirmation of the actual target transformation in
+an environment with demonstrably less interference. Compare against cached existing readers
+and the same writer/output, retain all runs, and include allocation, code size, optional values
+and representative topology. Require a repeatable end-to-end benefit and acceptable regressions
+before expanding the API. That controlled-host confirmation has **not** been performed; no new
+performance result is claimed for the runnable example. The broad design sweep is paused.
+
+## Historical baseline
 
 These are experimental patches and probes, not active production optimizations.
 The recorded prework baseline (`a0b1aab`) keeps binary group membership and the original
