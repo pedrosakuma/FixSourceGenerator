@@ -51,3 +51,4 @@ jobs:
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-order-check
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-process-check
           dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --writer-pipeline-check
+          dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-check

@@ -104,6 +104,10 @@ namespace FixSourceGenerator
                     .ToList();
 
                 var emittedHintNames = new HashSet<string>(StringComparer.Ordinal);
+                // Shared across every [FixView] request in this batch (issue #32 follow-up): a
+                // group-boundary skip helper is emitted once per (schema, topology) here instead
+                // of once per view, however many views project over the same scope.
+                var groupHelpers = new Views.GroupHelperRegistry();
 
                 foreach (var request in requests)
                 {
@@ -113,13 +117,29 @@ namespace FixSourceGenerator
                         continue;
                     }
 
-                    var result = FixViewEmitter.Generate(request, schemaList, diagnostic => sourceContext.ReportDiagnostic(diagnostic));
+                    var result = FixViewEmitter.Generate(request, schemaList, diagnostic => sourceContext.ReportDiagnostic(diagnostic), groupHelpers);
                     if (result == null)
                     {
                         continue;
                     }
 
                     var (hintName, content) = result.Value;
+                    if (!emittedHintNames.Add(hintName))
+                    {
+                        sourceContext.ReportDiagnostic(Diagnostic.Create(
+                            FixDiagnostics.DuplicateDefinition,
+                            Location.None,
+                            "generated source hint name",
+                            hintName));
+                        continue;
+                    }
+
+                    sourceContext.AddSource(hintName, content);
+                }
+
+                foreach (var (hintName, content) in groupHelpers.BuildOutputs())
+                {
+                    sourceContext.CancellationToken.ThrowIfCancellationRequested();
                     if (!emittedHintNames.Add(hintName))
                     {
                         sourceContext.ReportDiagnostic(Diagnostic.Create(

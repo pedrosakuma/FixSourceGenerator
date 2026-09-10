@@ -12,6 +12,11 @@ versions until `1.0.0`.
   operations with `InvalidOperationException`, preventing malformed success-shaped frames (#23).
 
 ### Added
+- Generated `[FixView]` component/qualified-entry projections with scoped group lookup,
+  first-occurrence scalar selection, optional-span presence helpers and raw `CurrentSpan`
+  access without constructing the full entry reader (#32). Children of optional components
+  are contextually optional; affected scalar projections must use nullable property types.
+  Ordinary reader/writer consumers retain the net6/C#11 floor; FixView still requires C#13.
 - Scoped reader/writer API contract design (docs/CONTRACT.md §12) for the next-generation
   generated shape: per-scope required constructors/factories, optional-component/required-group
   contextual requiredness, group-count policy comparison (upfront count vs. backpatch), and

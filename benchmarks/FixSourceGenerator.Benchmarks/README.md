@@ -755,3 +755,112 @@ ranges were 83.64-92.73 us versus 51.70-57.62 us for X and 68.44-71.20 us versus
 39.34-43.84 us for W. The no-temporal controls remained close. This supports the integrated
 parser improvement, but remains a shared-host paired load, not a new BenchmarkDotNet run
 or a production latency guarantee. Group-scoped projection remains a narrower prototype.
+
+### Generated entry/component projections (#32)
+
+Measured on 2026-09-09 after both implementation agents stopped building: same shared
+EPYC 7763/Ubuntu 24.04 host, SDK 10.0.400, runtime 10.0.11, BDN 0.15.8, Release.
+One launch, two warmups, three measured iterations. These are short exploratory runs,
+not release latency guarantees: the 99.9% error intervals are wide with only three samples.
+
+The full and projected methods run in the **same candidate build**, with the #30 temporal
+parser, identical X/W frame bytes and selected-field digests. This is not a before/after
+comparison against an unmodified old assembly. Envelope/network validation is not timed.
+The projections here are generated FixViews, not the earlier handwritten process prototypes.
+
+Means (sample standard deviation), microseconds per frame:
+
+| Message | Entries | Full reader | Generated projection |
+|---|---:|---:|---:|
+| X | 1 | 1.391 (0.037) | 0.893 (0.031) |
+| W | 1 | 1.497 (0.037) | 0.771 (0.037) |
+| X | 10 | 12.629 (0.750) | 7.688 (0.186) |
+| W | 10 | 8.561 (0.123) | 5.665 (0.063) |
+| X | 50 | 56.043 (1.136) | 37.759 (1.731) |
+| W | 50 | 39.326 (1.907) | 25.486 (0.351) |
+
+No managed allocation was reported by MemoryDiagnoser for these warmed paths. At 50 entries,
+the mean reductions were about 33% for X and 35% for W, subject to the uncertainty above.
+For example, the 99.9% half-widths for X/50 were 20.717 us full and 31.580 us projected;
+for W/50 they were 34.785 us and 6.396 us.
+
+The small-message two-field benchmark measured 160.5 ns (3.16 ns SD) for the full reader
+and 112.6 ns (3.03 ns SD) for FixView, with no reported allocation. Reading price/size twice
+per X entry versus caching their first conversions at the call site measured:
+
+| Entries | Repeated getters, us | Cached local conversions, us |
+|---:|---:|---:|
+| 1 | 0.569 (0.017) | 0.514 (0.003) |
+| 10 | 5.242 (0.161) | 4.405 (0.046) |
+| 50 | 27.266 (0.691) | 22.608 (0.339) |
+
+Both access cases use the same lazy generated constructor. This measures call-site caching,
+**not an alternative eagerly converting generated constructor**. It does not justify changing
+the default conversion/storage strategy for all consumers.
+
+Generated state/code inspection before helper sharing (`e8c137f`) exposed this trade-off:
+
+| Type | Instance fields | Constructor IL bytes | Declared method IL bytes |
+|---|---:|---:|---:|
+| X projection | 36 | 3,515 | 96,557 |
+| W projection | 30 | 1,225 | 1,778 |
+| X two-field projection | 7 | 2,773 | 96,006 |
+| X full entry reader | 294 | 5,780 | 6,807 |
+| W full entry reader | 264 | 5,212 | 6,008 |
+
+Field counts include the source span, not byte-sized instance-layout measurements. Method IL
+excludes constructors and nested types; none of these columns represents native/JIT code size.
+Those large X method totals included recursively generated group-boundary helpers duplicated
+per view. Fewer cached fields do **not** imply less generated code.
+
+### Shared helper update (#32)
+
+Views now call one `Runtime.FixViewGroupSkipHelpers` container per runtime namespace. Helpers
+are keyed by resolved group-definition identity, not short names, and retain contextual boundary
+arguments. Using the runtime namespace also avoids colliding with FIX message/component names.
+
+| Type | Previous declared method IL | Shared-helper version |
+|------|----------------------------:|----------------------:|
+| X projection | 96,557 bytes | 665 bytes |
+| W projection | 1,778 bytes | 548 bytes |
+| X two-field projection | 96,006 bytes | 114 bytes |
+
+Field counts and constructor IL are unchanged. **The helper code has not disappeared:** the
+fixture's schema-wide container has 339 methods / **104,814 IL bytes**, shared across its
+header and entry projections. Ordinary reader boundary helpers still have their own schema-level
+copy; the two incremental pipelines have not been combined. These are IL sizes, not native code.
+
+A serial rerun on the same host/runtime and short-run settings above produced:
+
+| Message | Entries | Full decode mean (SD), us | Projected mean (SD), us |
+|---------|--------:|--------------------------:|-----------------------:|
+| X | 1 | 1.318 (0.023) | 0.828 (0.021) |
+| W | 1 | 1.193 (0.024) | 0.760 (0.001) |
+| X | 10 | 11.285 (0.340) | 6.937 (0.108) |
+| W | 10 | 8.332 (0.326) | 5.346 (0.072) |
+| X | 50 | 54.333 (0.133) | 33.755 (0.082) |
+| W | 50 | 37.962 (0.862) | 24.737 (0.701) |
+
+Digests agree and no warmed managed allocation was reported. Projected means remain below full
+decode for these fixtures; three measured iterations and wide confidence intervals do not
+establish precise production speedups or an independent speedup caused by helper sharing.
+
+Run from the relevant worktree root, not its parent repository containing other worktrees
+(otherwise BDN can reject multiple identically named project files):
+
+```bash
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-check
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- --reader-fixview-code-size
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*MarketDataReaderBenchmarks.DecodeX' '*MarketDataReaderBenchmarks.DecodeXProjected' \
+           '*MarketDataReaderBenchmarks.DecodeW' '*MarketDataReaderBenchmarks.DecodeWProjected' \
+  --warmupCount 2 --iterationCount 3 --launchCount 1 --buildTimeout 300
+dotnet run --no-build -c Release --project benchmarks/FixSourceGenerator.Benchmarks -- \
+  --filter '*MarketDataReaderBenchmarks.DecodeXProjectedRepeatedGetters' \
+           '*MarketDataReaderBenchmarks.DecodeXProjectedCachedConversions' \
+           '*FixViewBenchmarks.Decode_FullReader_TwoFields' '*FixViewBenchmarks.Decode_FixView_TwoFields' \
+  --warmupCount 2 --iterationCount 3 --launchCount 1 --buildTimeout 300
+```
+
+Build first after source changes. Confirm the report contains actual results: BDN can exit
+successfully after a boilerplate build failure and report `NA` with zero benchmarks executed.

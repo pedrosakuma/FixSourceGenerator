@@ -82,11 +82,8 @@ public class FixViewBenchmarks
     }
 
     /// <summary>
-    /// [FixView] exposing the group as a typed property (issue #17), alongside the same 2 scalar
-    /// fields. Expected to be roughly on par with (not faster than) the full reader here: the
-    /// group property isn't part of the early-exit scan — it's a lazy wrapper over the whole
-    /// buffer either way, in both the view and the full reader (see FixViewEmitter.EmitGroupPropertyImpl).
-    /// This benchmark exists to confirm that claim empirically, not to show a win.
+    /// Includes the selective view's scoped group-location cost and subsequent enumeration.
+    /// Unlike the full reader, the view bounds the group before constructing its group reader.
     /// </summary>
     [Benchmark]
     [DiagnosticKind(BenchmarkDiagnosticKind.Cpu, DurationSeconds = 8)]
