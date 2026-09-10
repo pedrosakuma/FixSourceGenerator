@@ -30,6 +30,7 @@ internal static class DesignExperiments
                     new DesignEditBenchmarks { Scenario = scenario, Change = change, Placement = placement }.Initialize(original);
         }
         CheckNested();
+        NativeDtoExperiments.Check();
         Console.WriteLine("Design fixtures agree: selected values, field orders, nested boundaries and edited envelopes.");
     }
 

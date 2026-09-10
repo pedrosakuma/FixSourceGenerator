@@ -1,7 +1,15 @@
 using BenchmarkDotNet.Running;
 using FixSourceGenerator.Benchmarks;
 
-if (args is ["--design-check"])
+if (args is ["--native-dto-load"])
+{
+    NativeDtoExperiments.Load();
+}
+else if (args is ["--native-dto-check"])
+{
+    NativeDtoExperiments.Check();
+}
+else if (args is ["--design-check"])
 {
     DesignExperiments.Check();
 }
