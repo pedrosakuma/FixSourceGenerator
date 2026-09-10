@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <ProjectReference Include="../EagerProjection.Generator.csproj" />
+    <ProjectReference Include="../../../../src/FixSourceGenerator/FixSourceGenerator.csproj" />
+    <None Include="../../../FixSourceGenerator.Benchmarks/Schema/NativeDto.xml" Link="NativeDto.xml" CopyToOutputDirectory="PreserveNewest" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

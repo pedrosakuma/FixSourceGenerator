@@ -1,7 +1,55 @@
 using BenchmarkDotNet.Running;
 using FixSourceGenerator.Benchmarks;
 
-if (args is ["--writer-codegen"])
+if (args is ["--eager-check"])
+{
+    EagerProjectionExperiments.Check();
+}
+else if (args is ["--eager-load"])
+{
+    EagerProjectionExperiments.Load();
+}
+else if (args is ["--eager-confirm"])
+{
+    EagerProjectionExperiments.Load(confirmation: true);
+}
+else if (args is ["--direct-writer-load"])
+{
+    DirectWriterExperiments.Load();
+}
+else if (args is ["--direct-writer-check"])
+{
+    DirectWriterExperiments.Check();
+}
+else if (args is ["--direct-writer-confirm"])
+{
+    DirectWriterExperiments.Load(confirmation: true);
+}
+else if (args is ["--native-dto-load"])
+{
+    NativeDtoExperiments.Load();
+}
+else if (args is ["--native-dto-check"])
+{
+    NativeDtoExperiments.Check();
+}
+else if (args is ["--design-check"])
+{
+    DesignExperiments.Check();
+}
+else if (args is ["--design-load", var designKind])
+{
+    DesignExperiments.Load(designKind);
+}
+else if (args is ["--design-tail"])
+{
+    DesignExperiments.Tail();
+}
+else if (args is ["--design-edit-positions"])
+{
+    DesignExperiments.Positions();
+}
+else if (args is ["--writer-codegen"])
 {
     var writer = new MarketDataWriterBenchmarks { Entries = 10 };
     writer.CheckEquivalentFrames();

@@ -126,6 +126,46 @@ is recycled, do not retain them across `await` or capture them, and copy only se
 when a longer lifetime is needed. Writer input spans are different: `scoped` inputs are copied
 immediately; the destination and owner metadata remain borrowed.
 
+## Direct transformation example
+
+[TransformationExample.Rewrite](../examples/ScopedCodec/TransformationExample.cs) is executable
+application code, **not a new generated API**. It uses the existing mini FIX44 NewOrderSingle
+reader and scoped writer to route an order to `ROUTER` / `VENUE` with an outgoing sequence/time
+and replacement ClOrdID supplied by the caller. It caches numeric getters, adjusts Price only
+when present, borrows Instrument/Party text and optionally filters parties by role.
+
+```bash
+dotnet run -c Release -f net6.0 --project examples/ScopedCodec
+dotnet run -c Release -f net9.0 --project examples/ScopedCodec
+```
+
+Keep the source alive and unchanged until the synchronous call returns. Source and destination
+must not overlap; the example rejects this before creating a writer. Owner metadata must also
+remain exclusive and non-overlapping as described above. Reuse initialized metadata and output
+storage between completed calls, but consume/send the previous output before overwriting it.
+On failure, discard partial output; reacquire a writer rather than using an old handle. The
+example propagates errors rather than returning a success-shaped partial frame.
+
+Without a filter, the advertised input group count is used. With a filter, an explicit first
+pass counts survivors before `BeginNoPartyIDs`; the second pass writes them in original order.
+This includes zero survivors. It is not a one-pass filter and does not sort or buffer entries.
+Zero Price remains present when the delta is zero; absent Price stays absent.
+
+This is a transformation of **already validated, schema-conforming input** for the mini
+dictionary, not a generic FIX proxy or validation layer. Business rules for changing order
+identifiers, prices, routing/session metadata and party roles remain the caller's responsibility.
+It preserves the known body/component/entry values except the requested changes, but deliberately
+normalizes an absent party group to `453=0`. It does not preserve unknown fields, duplicates,
+original ordering/formatting, or the incoming header/envelope. Readers' permissive defaults
+must not be treated as proof that arbitrary inbound traffic is valid.
+
+The executable cases cover missing/zero/nonzero Price, optional SecurityID/party fields,
+shorter/longer identifiers, all/some/no surviving parties, input immutability, rejected overlap,
+capacity failure and subsequent state reuse. The existing CI example executions run these on
+both consumer targets. Allocations in the executable assertions are not a benchmark of `Rewrite`.
+The [recorded design experiments](../benchmarks/experiments/README.md) explain why this pattern
+is the current starting point and why eager/owned alternatives remain experimental.
+
 ## Performance and integration evidence
 
 All timings, runtime versions, uncertainty and reproduction commands live in the

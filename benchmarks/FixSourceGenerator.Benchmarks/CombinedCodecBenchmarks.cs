@@ -77,7 +77,7 @@ internal sealed class CombinedCodecWorkload
 
     internal long Generation => _small ? _smallState[0].Generation : _state[0].Generation;
     internal int FrameLength => _length;
-    private ReadOnlySpan<byte> Frame => _small ? _smallBuffer.AsSpan(0, _length) : _market.WrittenFrame(_length);
+    internal ReadOnlySpan<byte> Frame => _small ? _smallBuffer.AsSpan(0, _length) : _market.WrittenFrame(_length);
 
     internal decimal Run(bool optimized)
     {
