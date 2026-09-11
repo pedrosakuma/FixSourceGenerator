@@ -20,3 +20,5 @@ foreach (decimal? price in new decimal?[] { null, 0m, 101.25m })
 #endif
     Console.WriteLine($"Encoded {length} bytes; price={price?.ToString() ?? "absent"}.");
 }
+
+TransformationExampleChecks.Run();
