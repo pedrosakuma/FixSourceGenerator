@@ -110,6 +110,7 @@ namespace FixSourceGenerator.Generators
                 string returnType = closure.IsGeneric
                     ? closure.ReturnType.Replace("<TContinuation>", "<TOuter>")
                     : closure.ReturnType;
+                support.Line("/// <summary>Closes this scope and consumes its handle. Continue only with the returned parent handle.</summary>");
                 support.Open(
                     $"public static {returnType} {closure.Method}{generic}(" +
                     $"this {receiverType} child{closure.Parameters})");
@@ -145,6 +146,7 @@ namespace FixSourceGenerator.Generators
             string phaseBase = PhaseName(baseName, phaseStart);
             string phaseType = TypeUse(phaseBase, shape.IsGeneric);
 
+            w.Line("/// <summary>A linear writer phase over caller-owned buffers. Fluent transitions consume this handle; continue with their return value. Failed live mutations invalidate all handles for this message.</summary>");
             w.Open($"public ref struct {phaseType}");
             if (shape.IsRoot)
             {
@@ -160,9 +162,11 @@ namespace FixSourceGenerator.Generators
 
             if (shape.IsRoot)
             {
+                w.Line("/// <summary>Initializes metadata before first use. Reuse it without clearing between messages; never initialize while a message owns it.</summary>");
                 w.Line($"public static void InitializeState(global::System.Span<{_runtimeNs}.FixWriterState> state) => {_runtimeNs}.FixWriterState.Initialize(state);");
                 w.Line();
                 string parameters = RequiredParameterList(entries, phaseStart, current);
+                w.Line("/// <summary>Begins a message with exclusive, non-overlapping destination and initialized state buffers. Both buffers must remain alive until completion.</summary>");
                 w.Open($"public {phaseBase}(global::System.Span<byte> destination, global::System.Span<{_runtimeNs}.FixWriterState> state{parameters})");
                 w.Line($"_context = {_runtimeNs}.FixWriterContext.Begin(destination, state, RequiredStateLength, BeginStringBytes, MsgTypeBytes);");
                 EmitRequiredWrites(w, entries, phaseStart, current);
@@ -523,6 +527,7 @@ namespace FixSourceGenerator.Generators
             switch (terminal.Kind)
             {
                 case TerminalKind.Message:
+                    w.Line("/// <summary>Finalizes BodyLength and CheckSum and consumes this handle. Returns the written byte count; send only the completed slice.</summary>");
                     w.Line("public int Finish() => _context.Finish();");
                     break;
                 case TerminalKind.Component:
@@ -531,6 +536,7 @@ namespace FixSourceGenerator.Generators
                     w.Close();
                     break;
                 case TerminalKind.Entry:
+                    w.Line("/// <summary>Closes and counts this entry, consuming its handle. Continue with the returned group handle.</summary>");
                     w.Open($"public {terminal.ReturnType} EndEntry()");
                     w.Line("_context.EndEntry();");
                     w.Line($"return new {terminal.ReturnType}(_context.Take());");

@@ -39,6 +39,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="../../docs/USAGE.md" Link="TestData/USAGE.md" CopyToOutputDirectory="PreserveNewest" />
     <None Update="TestData\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

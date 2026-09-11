@@ -18,7 +18,7 @@ namespace FixSourceGenerator.Views
         /// prefixes, no whitespace) a <c>[FixView]</c> property is allowed to use for the given
         /// field, plus the human-readable list used in FIX014's message.
         /// </summary>
-        public static (HashSet<string> Accepted, string DisplayList) GetAcceptedTypes(FixFieldDef field, bool required)
+        public static (HashSet<string> Accepted, string DisplayList) GetAcceptedTypes(FixFieldDef field, bool required, string schemaNamespace)
         {
             var accepted = new HashSet<string>(StringComparer.Ordinal);
             var display = new List<string>();
@@ -35,7 +35,7 @@ namespace FixSourceGenerator.Views
 
             if (FixEntryHelpers.IsEnumEligible(field))
             {
-                string enumName = field.Name.ToIdentifier();
+                string enumName = $"global::{schemaNamespace}.{field.Name.ToIdentifier()}";
                 var translated = TypeTranslator.Translate(field.Type);
                 bool isCharBacked = translated.Category == FixTypeCategory.Char;
                 string underlying = isCharBacked ? "byte" : "int";
@@ -104,29 +104,40 @@ namespace FixSourceGenerator.Views
         {
             string s = typeText.Replace(" ", string.Empty).Replace("\t", string.Empty).Replace("\r", string.Empty).Replace("\n", string.Empty);
             s = s.Replace("global::", string.Empty);
-            s = s.Replace("System.", string.Empty);
+            if (s.StartsWith("System.", StringComparison.Ordinal))
+            {
+                s = s.Substring("System.".Length);
+            }
             return s;
         }
 
-        public static bool IsCompatible(string declaredTypeText, HashSet<string> accepted)
+        public static bool IsCompatible(FixViewPropertyModel property, HashSet<string> accepted)
         {
-            return accepted.Contains(Normalize(declaredTypeText));
+            foreach (string candidate in property.TypeCandidates)
+            {
+                if (accepted.Contains(Normalize(candidate)))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
         /// Whether a declared property type matches the given group's reader type (issue #17):
-        /// exactly <c>{RuntimeNamespace}.{GroupName}GroupReader</c>, normalized so
-        /// <c>global::</c>/fully-qualified and bare spellings both compare equal. Unlike scalar
+        /// exactly <c>{SchemaNamespace}.{GroupName}GroupReader</c>, after discovery resolves
+        /// imports and aliases in the consumer's context. Unlike scalar
         /// fields, a group has no nullable/span escape hatch — it always "exists" as a reader
         /// (an absent group simply has <c>Count == 0</c>).
         /// </summary>
-        public static bool IsGroupTypeCompatible(string declaredTypeText, string runtimeNamespace, string groupName)
+        public static bool IsGroupTypeCompatible(FixViewPropertyModel property, string runtimeNamespace, string groupName)
         {
             string expected = Normalize($"{runtimeNamespace}.{groupName.ToIdentifier()}GroupReader");
-            return Normalize(declaredTypeText) == expected;
+            return IsCompatible(property, new HashSet<string>(StringComparer.Ordinal) { expected });
         }
 
         /// <summary>The human-readable expected type name for a group property, used in FIX014's message.</summary>
-        public static string GroupReaderDisplayName(string groupName) => groupName.ToIdentifier() + "GroupReader";
+        public static string GroupReaderDisplayName(string schemaNamespace, string groupName) =>
+            $"global::{schemaNamespace}.{groupName.ToIdentifier()}GroupReader";
     }
 }

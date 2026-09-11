@@ -316,6 +316,9 @@ diagnostic (no build break unless the descriptor's severity is `Error`):
 | FIX008 | Two or more components reference each other circularly and can't be generated. |
 
 See `docs/CONTRACT.md` §8 for full descriptions and `AnalyzerReleases.Shipped.md` for severities.
+If generated types are missing entirely rather than diagnosed, see
+[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — that's usually a wiring problem (`AdditionalFiles`,
+analyzer reference shape, or namespace property), not a schema diagnostic.
 
 ## 5.1. Selective projection with `[FixView]`
 
@@ -326,7 +329,9 @@ by property name, or via `[FixField("...")]` when the names diverge — and emit
 property bodies plus a single scanning constructor that **stops early** once every requested tag
 has been located (unlike the full reader, which always scans everything it declares).
 
+<!-- fixview-routing-declaration -->
 ```csharp
+using System;
 using FixSourceGenerator.Attributes;
 using Acme.Fix.V44; // for the Side enum, if you want the typed variant
 
@@ -342,7 +347,11 @@ public readonly ref partial struct OrderRoutingView
     public partial NoPartyIDsGroupReader NoPartyIDs { get; }
 }
 
-// ...
+```
+
+In a method with the original validated `buffer` still alive (`using System.Text;`):
+
+```csharp
 var view = new OrderRoutingView(buffer);
 Console.WriteLine(Encoding.ASCII.GetString(view.ClOrdID));
 foreach (var party in view.NoPartyIDs)
@@ -381,7 +390,15 @@ while (iterator.MoveNext())
 ```
 
 `[FixView("Instrument")]` targets a component. Qualify an ambiguous component/group with its
-message path; `FIX016` rejects ambiguous short names. Descendants of optional components
+message path; `FIX016` rejects ambiguous short names. A qualified path (e.g.
+`NewOrderSingle.NoPartyIDs`, or a deeper `Message.Component.Group` chain) disambiguates
+*within* a single loaded schema by walking a unique component/group at each segment — it is
+**not** a schema-version selector. If the same qualified path independently resolves inside more
+than one loaded schema (e.g. two dictionary versions that both declare a component with that
+name at that path), `FIX016` is still reported: qualification narrows which scope a name refers
+to, not which schema a message comes from. See `docs/CONTRACT.md` §11 for the full resolution
+order (message, then component, then group; qualified paths first try a message root, then a
+component root). Descendants of optional components
 require nullable value properties even when the field itself is required inside that component.
 Views choose the first scalar occurrence within the applicable scope; they are not strict
 duplicate-field validators. Neither views nor their spans may outlive or survive reuse of the
@@ -404,7 +421,8 @@ input buffer. Copy selected values explicitly if they must be retained.
 | FIX015 | Two or more properties target the same field or group. |
 | FIX016 | A short target name matches more than one component/group scope; qualify its path. |
 
-See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations).
+See `docs/CONTRACT.md` §11 for the full design (type-compatibility matrix, scope limitations),
+and [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for worked fixes to `FIX014`/`FIX016`.
 
 ## 6. Versioning schemas over time
 
@@ -418,21 +436,71 @@ as you add support for additional FIX versions:
   land in the same namespace) — give schema variants distinct version metadata, or maintain a
   single evolving file per version and rely on source control history/tags for point-in-time
   diffs rather than parallel files with the same declared version.
-- **Diff before you deploy.** Use `FixSourceGenerator.Diff.SchemaDiffer.Diff(oldSchema, newSchema)`
-  to compare two parsed `FixDictionary` instances (parse each with `SchemaReader.Parse(...)`) and
-  get a structured list of `SchemaChange` entries, each classified `Breaking`/`Warning`/`Info`.
-  Render a human-readable report with `SchemaDiffReport.ToMarkdown(changes)`:
+- **Diff before you deploy.** `FixSourceGenerator.Diff.SchemaDiffer.Diff(oldSchema, newSchema)`
+  compares two parsed `FixDictionary` instances (parse each with `SchemaReader.Parse(...)`) and
+  returns a structured list of `SchemaChange` entries, each classified `Breaking`/`Warning`/`Info`.
+  `SchemaDiffReport.ToMarkdown(changes)` renders a human-readable report. **These are ordinary
+  public types in the generator's assembly, not a separate published API** — the `FixSourceGenerator`
+  NuGet package only ships the analyzer DLL (`DevelopmentDependency`/`IncludeBuildOutput=false`,
+  packed solely under `analyzers/dotnet/cs`), so a normal `PackageReference` to the released
+  package does **not** let you call `SchemaReader`/`SchemaDiffer` from your own code — the
+  assembly is loaded into the compiler's analyzer context, not exposed as a compile-time
+  reference. To use these types from a standalone CI/tooling project (not as a code generator),
+  reference the generator project **as a normal library**, i.e. a plain `ProjectReference` with
+  no `OutputItemType="Analyzer"`/`ReferenceOutputAssembly="false"` — the same pattern already used
+  by `tests/FixSourceGenerator.Tests/FixSourceGenerator.Tests.csproj` (which references
+  `SchemaReader` directly for its own parser tests):
+
+  ```xml
+  <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+      <OutputType>Exe</OutputType>
+      <TargetFramework>net9.0</TargetFramework>
+      <ImplicitUsings>enable</ImplicitUsings>
+      <Nullable>enable</Nullable>
+    </PropertyGroup>
+    <ItemGroup>
+      <ProjectReference Include="path/to/FixSourceGenerator.csproj" />
+      <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
+    </ItemGroup>
+  </Project>
+  ```
+
+  This is source/project-reference-only today: there is no separate `FixSourceGenerator.Diff`
+  (or similar) package, and building such a tool means either vendoring the generator's source
+  tree or referencing it via `ProjectReference` from a repository that has it checked out (e.g.
+  a submodule). Contrast this with the `OutputItemType="Analyzer" ReferenceOutputAssembly="false"`
+  reference used everywhere else in this guide and in `examples/ScopedCodec`: that form loads the
+  assembly as a Roslyn analyzer and deliberately excludes it from your compile-time references,
+  which is correct for codegen but wrong if you want to call `SchemaReader`/`SchemaDiffer` directly.
+  The tooling project explicitly references Roslyn because `SchemaReader` exposes `Diagnostic`
+  and the generator's Roslyn dependency is private; this dependency belongs to the tool, not your
+  ordinary FIX consumer. Save the following as its `Program.cs`, then run
+  `dotnet run --project path/to/SchemaDiff.csproj -- FIX44-old.xml FIX44-new.xml`:
 
   ```csharp
   using FixSourceGenerator.Diff;
   using FixSourceGenerator.Schema;
+  using Microsoft.CodeAnalysis;
 
-  var oldSchema = SchemaReader.Parse(File.ReadAllText("FIX44-old.xml"), "FIX44-old.xml", d => { });
-  var newSchema = SchemaReader.Parse(File.ReadAllText("FIX44-new.xml"), "FIX44-new.xml", d => { });
+  if (args.Length != 2)
+  {
+      Console.Error.WriteLine("Usage: SchemaDiff <old.xml> <new.xml>");
+      return 2;
+  }
+  var diagnostics = new List<Diagnostic>();
+  var oldSchema = SchemaReader.Parse(File.ReadAllText(args[0]), args[0], diagnostics.Add);
+  var newSchema = SchemaReader.Parse(File.ReadAllText(args[1]), args[1], diagnostics.Add);
+  foreach (var diagnostic in diagnostics)
+      Console.Error.WriteLine(diagnostic);
+  if (oldSchema is null || newSchema is null ||
+      diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error))
+      return 2;
 
-  var changes = SchemaDiffer.Diff(oldSchema!, newSchema!);
+  var changes = SchemaDiffer.Diff(oldSchema, newSchema);
   bool hasBreakingChanges = changes.Any(c => c.Severity == SchemaDiffSeverity.Breaking);
-  string report = SchemaDiffReport.ToMarkdown(changes);
+  Console.WriteLine(SchemaDiffReport.ToMarkdown(changes));
+  return hasBreakingChanges ? 1 : 0;
   ```
 
   Breaking changes flagged include: a required field removed/added, a message or component

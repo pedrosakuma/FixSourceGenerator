@@ -117,10 +117,11 @@ namespace FixSourceGenerator.Diagnostics
         public static readonly DiagnosticDescriptor FixViewIncompatibleType = new DiagnosticDescriptor(
             id: "FIX014",
             title: "FixView property type incompatible with field type",
-            messageFormat: "Property '{0}' has type '{1}', which is not compatible with field '{2}' (FIX type '{3}'). Accepted types: {4}",
+            messageFormat: "Property '{0}' has type '{1}', which is not compatible with field '{2}' (FIX type '{3}'). Accepted types: {4}.",
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
-            isEnabledByDefault: true);
+            isEnabledByDefault: true,
+            helpLinkUri: "https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/TROUBLESHOOTING.md#fix014");
 
         public static readonly DiagnosticDescriptor FixViewDuplicateFieldTarget = new DiagnosticDescriptor(
             id: "FIX015",
@@ -133,9 +134,10 @@ namespace FixSourceGenerator.Diagnostics
         public static readonly DiagnosticDescriptor FixViewAmbiguousGroupScope = new DiagnosticDescriptor(
             id: "FIX016",
             title: "FixView target scope is ambiguous",
-            messageFormat: "[FixView(\"{0}\")] on '{1}' matches more than one scope in the loaded schemas; use a qualified message or component path",
+            messageFormat: "[FixView(\"{0}\")] on '{1}' matches more than one scope in the loaded schemas: {2}; qualify the message/component path within one schema, or load only one schema containing that path",
             category: Category,
             defaultSeverity: DiagnosticSeverity.Error,
-            isEnabledByDefault: true);
+            isEnabledByDefault: true,
+            helpLinkUri: "https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/TROUBLESHOOTING.md#fix016");
     }
 }

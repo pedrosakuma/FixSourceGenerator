@@ -7,7 +7,9 @@ but for the tag=value wire format instead of Simple Binary Encoding.
 
 See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the full design contract (input schema shape,
 C# output shape, type mapping, versioning, diagnostics) and [`docs/USAGE.md`](docs/USAGE.md) for
-a getting-started guide, a worked example, and the schema-versioning guide. The tracking issue
+a getting-started guide, a worked example, and the schema-versioning guide. Hit a build-time
+surprise (missing generated types, `FIX014`/`FIX016`, inspecting generated code)? See
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md). The tracking issue
 [#1](https://github.com/pedrosakuma/FixSourceGenerator/issues/1) has the overall roadmap.
 
 **Unreleased API:** scoped writers intentionally break the flat writer API from 0.1.0.
@@ -39,7 +41,9 @@ Ordinary consumers require net6+/C#11; optional `[FixView]` projections require 
 
 ## Quick start
 
-1. Run the [compiled example](examples/ScopedCodec), which uses the current source generator:
+1. Run the [compiled example](examples/ScopedCodec) (see its own
+   [README](examples/ScopedCodec/README.md) for what each file demonstrates), which uses the
+   current source generator:
 
    ```bash
    dotnet restore examples/ScopedCodec --source https://api.nuget.org/v3/index.json
@@ -116,7 +120,10 @@ versioning schemas over time.
 - `docs/CONTRACT.md` — the normative design contract for input schema and generated output.
 - `docs/USAGE.md` — getting-started guide, worked example, and schema-versioning guide.
 - `docs/MIGRATION.md` — breaking API changes, ownership rules and integration evidence.
-- `examples/ScopedCodec` — runnable net6/C#11 codec and net9/C#13 projected consumer.
+- `docs/TROUBLESHOOTING.md` — fixes for common build-time surprises (missing generated types,
+  `FIX014`/`FIX016`, inspecting generated code, writer reuse/poison-state behavior).
+- `examples/ScopedCodec` — runnable net6/C#11 codec and net9/C#13 projected consumer; see its own
+  [README](examples/ScopedCodec/README.md) for a per-file breakdown.
 - `CHANGELOG.md` — release history.
 
 ## License

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4">
+  <header/>
+  <trailer/>
+  <messages>
+    <message name="NewOrderSingle" msgtype="D" msgcat="app">
+      <component name="Instrument" required="Y">
+  </messages>
+  <components>
+    <component name="Instrument">
+      <field name="Symbol" required="Y"/>
+    </component>
+  </components>
+  <fields>
+    <field number="55" name="Symbol" type="STRING"/>
+  </fields>
+</fix>

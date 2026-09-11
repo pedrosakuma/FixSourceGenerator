@@ -5,6 +5,8 @@ using BenchmarkDotNet.Jobs;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44.Runtime;
 using QuickFix.FIX44;
+using NewOrderSingleReader = FixSourceGenerator.Benchmarks.Generated.Fix.V44.BenchmarkNewOrderSingleReader;
+using NewOrderSingleWriter = FixSourceGenerator.Benchmarks.Generated.Fix.V44.BenchmarkNewOrderSingleWriter;
 
 namespace FixSourceGenerator.Benchmarks;
 

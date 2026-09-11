@@ -33,8 +33,9 @@ mas o caminho para chegar lá é diferente, porque o domínio é diferente.
 **reader/writer `ref struct`** sobre `Span<byte>`/`ReadOnlySpan<byte>`, análogo ao
 `System.Text.Json.Utf8JsonReader`/`Utf8JsonWriter` — não uma camada de DTOs alocados por
 padrão. Decode é *lazy* (campo só é parseado quando acessado), strings são expostas como
-`ReadOnlySpan<byte>`/`ReadOnlySpan<char>` por padrão (só alocam `string` se o consumidor
-chamar `.ToString()` explicitamente), grupos repetidos são sub-scanners aninhados com
+`ReadOnlySpan<byte>` por padrão — o generator não emite um `.ToString()`/`{Field}String`
+próprio; o consumidor materializa explicitamente com `Encoding.ASCII.GetString(...)`
+quando precisar de um `string` (ver USAGE.md §3) —, grupos repetidos são sub-scanners aninhados com
 tags delimitadores conhecidos em compile-time (não há lookup em dicionário runtime), e o
 encode escreve direto no buffer fornecido pelo chamador com *backpatch* de `BodyLength`
 (tag 9) e `CheckSum` (tag 10) via soma corrida — a mesma técnica usada por engines FIX de
@@ -60,8 +61,9 @@ Suportado:
 | `<value>` (filho de `<field>`) | `enum`, `description?` | Gera enum C# (§3). |
 
 Fora de escopo / diferido:
-- Extensões vendor fora do shape QuickFIX clássico → toleradas com diagnóstico Info, não falham o build.
-- Tipo de campo desconhecido → fallback para `string` + diagnóstico Warning (nunca falha o build).
+- Extensões vendor fora do shape QuickFIX clássico → toleradas com diagnóstico Warning (FIX003), não falham o build.
+- Tipo de campo desconhecido → fallback para `ReadOnlySpan<byte>` (span bruto, não `string`) +
+  diagnóstico Warning (nunca falha o build).
 - Validação de range/domínio em runtime além de required/tipo (fast-follow).
 
 ### 1.1 Composição FIXT1.1 (transport) + FIX5.0SPx (aplicação)
@@ -90,10 +92,15 @@ completo) e expõe:
   conversão de tipo (`decimal`/`DateTime`/enum/etc.) só acontece no getter, sob demanda
   — campos nunca lidos nunca pagam o custo de parse, mas todos pagam o custo (barato)
   de localização no scan único do construtor. Ver "Estratégia de leitura" abaixo.
-- **Strings como span por padrão:** `ReadOnlySpan<byte> ClOrdIdBytes` /
-  `ReadOnlySpan<char>` via decodificação ASCII sem alocação; um método explícito
-  `ToClOrdIdString()` (ou propriedade `string ClOrdId`) aloca sob demanda apenas se
-  chamado — nunca implicitamente.
+- **Strings como span por padrão:** o campo é exposto diretamente sob o próprio nome
+  (ex. `ReadOnlySpan<byte> ClOrdID`, não `ClOrdIdBytes`) — sem `string` intermediário,
+  sem materialização implícita. O generator **não** emite um método
+  `ToClOrdIdString()`/`ClOrdId` auxiliar; para materializar, o consumidor chama
+  explicitamente `Encoding.ASCII.GetString(reader.ClOrdID)` (ver
+  [`USAGE.md`](USAGE.md) §3). *(Histórico: `ClOrdIdBytes`/`ToClOrdIdString()` foi a
+  proposta original deste parágrafo antes da implementação; nunca foi codificada e não
+  reflete o gerador atual — corrigido aqui para casar com `TypeTranslator`/`ReaderEmitter`
+  e com os exemplos reais em `examples/ScopedCodec`.)*
 - **Campos numéricos/temporais parseados diretamente do span** (`Utf8Parser`,
   `int.TryParse(ReadOnlySpan<byte>)`, `decimal.TryParse(ReadOnlySpan<byte>)` — suportado
   nativamente a partir do .NET 8; como o v1 já assume net6+ no consumidor pelas decisões
@@ -135,7 +142,12 @@ completo) e expõe:
   grupos com muitas entradas.
 
 ```csharp
-// Ilustrativo — forma exata definida na issue #5 (codegen)
+// Histórico/ilustrativo — proposta original da issue #5 (codegen), anterior à
+// implementação. Não reflete o shape gerado hoje: não há sufixo `Bytes` nem método
+// `To{Field}String()`/propriedade `string` companheira. Para o shape real, gerado por
+// `ReaderEmitter`/`TypeTranslator` e verificado em `examples/ScopedCodec`, ver
+// USAGE.md §3 (`ReadOnlySpan<byte> ClOrdID`, materializado por
+// `Encoding.ASCII.GetString(reader.ClOrdID)` no lado do consumidor).
 public readonly ref struct NewOrderSingleReader
 {
     private readonly ReadOnlySpan<byte> _buffer;
@@ -232,7 +244,7 @@ de código estão registrados no README dos benchmarks.
 
 | FIX type | C# | Notas |
 |---|---|---|
-| `STRING`, `CURRENCY`, `EXCHANGE`, `COUNTRY`, `LANGUAGE`, `MONTHYEAR`, `XID`, `XIDREF` | `ReadOnlySpan<byte>` (+ `string` sob demanda via `.ToString()`) | Códigos lexicais ficam como span bruto. |
+| `STRING`, `CURRENCY`, `EXCHANGE`, `COUNTRY`, `LANGUAGE`, `MONTHYEAR`, `XID`, `XIDREF` | `ReadOnlySpan<byte>` (materialize `string` explicitamente com `Encoding.ASCII.GetString(...)`, sem `.ToString()`/método gerado) | Códigos lexicais ficam como span bruto. |
 | `MULTIPLEVALUESTRING`, `MULTIPLECHARVALUE`, `MULTIPLESTRINGVALUE` | `ReadOnlySpan<byte>` (span bruto do valor completo) **+** `{Field}Values` (`FixMultiValueEnumerator`) | Split tipado, allocation-free, sobre a lista delimitada por espaço — ver §2 "Decode". |
 | `CHAR` | `char` (ou enum gerado, ver §3) | |
 | `INT`, `LENGTH`, `SEQNUM`, `NUMINGROUP`, `DAYOFMONTH`, `TAGNUM` | `int` | Parseado direto do span (`Utf8Parser`/loop de dígitos), sem alocação. |
@@ -297,7 +309,7 @@ opcionalidade dos componentes ancestrais (§11). Ver [MIGRATION.md](MIGRATION.md
   colisão de nomes (mesma estratégia de isolamento por schema do SbeSourceGenerator).
 - **Mensagem** → `{Name}Reader` / `{Name}Writer` (ex. `NewOrderSingleReader`, `NewOrderSingleWriter`).
 - **Componente** → `{Name}Reader` aninhável e reutilizável (ex. `InstrumentReader`) — **não flatten**.
-- **Grupo** → tipo aninhado no owner (mensagem/componente/grupo pai); convenção de nome:
+- **Grupo** → propriedade no owner (mensagem/componente/grupo pai), com tipos no namespace do schema; convenção de nome:
   `{GroupName}GroupReader` (ex. `NoAllocsGroupReader`), com enumerador `foreach`-style
   sobre entradas `{GroupName}EntryReader`.
 - **Enum de valores** → nome do campo (ex. `Side`), membros em PascalCase a partir de `description`.
@@ -338,7 +350,7 @@ no mesmo projeto consumidor sem colisão.
 | FIX003 | Warning | Construto de schema não suportado (extensão vendor, elemento desconhecido) — tolerado, não falha o build. |
 | FIX004 | Error | Definição duplicada no schema (tag/nome de campo duplicado, `msgtype` duplicado, componente duplicado). |
 | FIX005 | Error | Referência não resolvida (`<field>`/`<component>`/`<group>` referenciando nome inexistente). |
-| FIX006 | Warning | Tipo de campo FIX desconhecido → fallback para `string`. |
+| FIX006 | Warning | Tipo de campo FIX desconhecido → fallback para `ReadOnlySpan<byte>` (span bruto, não `string`). |
 | FIX007 | Warning | Grupo sem campo contador `NUMINGROUP` correspondente. |
 | FIX008 | Error | Referência circular de componente (A → B → A). |
 | FIX009 | Error | Valor de atributo inválido (ex. `number`/`major`/`minor`/`servicepack` não numérico) — antes descartado silenciosamente. |
@@ -348,7 +360,7 @@ no mesmo projeto consumidor sem colisão.
 | FIX013 | Error | `[FixField("X")]` referencia um campo inexistente na mensagem. |
 | FIX014 | Error | Tipo declarado da propriedade incompatível com o tipo FIX do campo — mensagem lista os tipos aceitos. |
 | FIX015 | Error | Duas ou mais propriedades da view apontam para o mesmo campo (mesmo tag). |
-| FIX016 | Error | Alvo simples de view resolve para múltiplos componentes/grupos; qualifique o caminho. |
+| FIX016 | Error | Alvo de view resolve para múltiplas mensagens/componentes/grupos; qualifique o caminho dentro de um schema ou isole schemas que contêm o mesmo caminho. |
 
 IDs FIX001–FIX005 já reservados no esqueleto atual do repositório e mantidos
 semanticamente compatíveis; FIX006–FIX009 são adições deste contrato; FIX010–FIX015 são do
@@ -401,7 +413,9 @@ early-exit**: a varredura para assim que todas as N tags pedidas já foram local
 do reader completo (§2), que não pode saber antecipadamente quantos campos possui.
 
 ```csharp
+using System;
 using FixSourceGenerator.Attributes;
+using Acme.Fix.V44;
 
 [FixView("NewOrderSingle")]
 public readonly ref partial struct OrderRoutingView
@@ -436,8 +450,9 @@ ser incluída nas medições. Campos individuais de uma repetição 0..N não s�
 use uma segunda `[FixView]` direcionada ao escopo da entrada.
 
 Escopo além de mensagem (issue #32): um nome simples é resolvido na ordem mensagem, componente,
-grupo. Mensagens preservam a seleção histórica do primeiro schema carregado; componentes/grupos
-repetidos entre schemas ou ocorrências são ambíguos. Caminhos pontuados distinguem ocorrências e
+grupo. Dentro da categoria escolhida, todas as ocorrências em todos os schemas são consideradas:
+mensagens/componentes/grupos repetidos entre schemas ou ocorrências são ambíguos, sem selecionar
+silenciosamente o primeiro arquivo. Caminhos pontuados distinguem ocorrências e
 preservam a propriedade lógica, por exemplo
 `MarketDataIncrementalRefresh.MDIncGrp.NoMDEntries` e
 `MarketDataSnapshotFullRefresh.MDFullGrp.NoMDEntries`. Cada segmento depois da raiz deve ser um
@@ -463,9 +478,11 @@ while (enumerator.MoveNext())
 }
 ```
 
-**Ambiguidade (FIX016):** mais de um componente/grupo elegível para o mesmo alvo simples produz
-`FIX016`, independentemente de as formas serem iguais. Use um caminho qualificado; o generator não
-seleciona nem une ocorrências por nome.
+**Ambiguidade (FIX016):** mais de uma mensagem/componente/grupo elegível para o alvo produz
+`FIX016`, independentemente de as formas serem iguais ou da ordem dos arquivos. O diagnóstico
+lista namespaces de versão e caminhos candidatos. Use um caminho qualificado quando ele for
+único; se o mesmo caminho existir em vários schemas, carregue-os em projetos separados.
+O generator não seleciona nem une ocorrências por nome.
 
 Ao escanear um escopo, counters de grupos filhos estabelecem regiões aninhadas. A view pula a
 quantidade declarada usando delimitador, membership e a topologia recursiva do schema antes de
@@ -520,10 +537,11 @@ Requisitos e limitações (v1):
   **mensagem** — fora de escopo (issue #17 só permite expor o grupo inteiro via seu
   `{Group}GroupReader` a partir de uma view de mensagem). Para projetar campos de dentro de um
   grupo, aponte o `[FixView]` diretamente para o nome do grupo (ver acima, issue #32).
-- A resolução de tipo é feita por comparação **textual** do tipo declarado (não por
-  `ITypeSymbol` resolvido), porque um tipo enum gerado pelo próprio generator nessa mesma
-  passagem incremental ainda não existe como metadata resolvível — casar pelo texto evita esse
-  problema de auto-referência.
+- Tipos já resolvidos usam identidade semântica. Enums/readers de grupo emitidos nesta passagem
+  ainda não existem na compilação de entrada; nesses casos, o generator combina o nome textual
+  com namespaces/imports/aliases do consumidor e compara com o tipo do schema selecionado.
+  `using`, nomes qualificados e aliases são aceitos, mas um tipo homônimo de outro namespace não.
+  As implementações usam nomes totalmente qualificados, sem depender dos imports do consumidor.
 
 ## 12. Contrato de API `ref struct` por escopo (issues #29/#31, writer implementado)
 
