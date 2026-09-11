@@ -5,7 +5,7 @@ namespace FixSourceGenerator.Views
 {
     /// <summary>
     /// One <c>partial</c> property declared on a <c>[FixView]</c>-annotated struct, extracted
-    /// straight from syntax (see remarks on why this avoids <see cref="ITypeSymbol"/> resolution).
+    /// from syntax and semantic type information.
     /// </summary>
     /// <remarks>
     /// The declared property type is captured as its literal source text (e.g. <c>"Side"</c>,
@@ -14,8 +14,8 @@ namespace FixSourceGenerator.Views
     /// same generator is *also* emitting in the same compilation pass (e.g. <c>Side</c>) has no
     /// resolvable metadata symbol yet — the semantic model reports <c>TypeKind.Error</c> for it,
     /// since incremental generators can't see each other's not-yet-emitted output within one pass.
-    /// Matching against the textual spelling of the type sidesteps this entirely and mirrors how
-    /// the rest of the codegen already treats enum names (schema field name → <c>ToIdentifier()</c>).
+    /// Discovery therefore also captures namespace/alias-aware candidate names for unresolved
+    /// generated types, while resolved consumer types retain their semantic identity.
     /// </remarks>
     public sealed class FixViewPropertyModel
     {
@@ -40,6 +40,8 @@ namespace FixSourceGenerator.Views
 
         /// <summary>The property's declared type, exactly as written in source.</summary>
         public string DeclaredTypeText { get; }
+
+        internal ImmutableArray<string> TypeCandidates { get; set; }
 
         /// <summary>
         /// Whether this property declaration is the partial *definition* (no accessor bodies)

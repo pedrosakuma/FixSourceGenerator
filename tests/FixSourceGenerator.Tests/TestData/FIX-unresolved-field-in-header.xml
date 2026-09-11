@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fix type="FIX" major="4" minor="4">
+  <header>
+    <field name="MissingHeaderField" required="Y"/>
+  </header>
+  <trailer/>
+  <messages/>
+  <components/>
+  <fields/>
+</fix>

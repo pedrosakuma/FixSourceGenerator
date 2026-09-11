@@ -51,6 +51,8 @@ writers. Failure invalidates the writer owner; discard partial output and never 
 
 - [Runnable example](https://github.com/pedrosakuma/FixSourceGenerator/tree/main/examples/ScopedCodec)
 - [Usage and installation](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/USAGE.md)
+- [Migration guide](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/MIGRATION.md)
+- [Troubleshooting](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/TROUBLESHOOTING.md)
 - [Design contract](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/docs/CONTRACT.md)
 - [Performance evidence and limitations](https://github.com/pedrosakuma/FixSourceGenerator/blob/main/benchmarks/FixSourceGenerator.Benchmarks/README.md)
 

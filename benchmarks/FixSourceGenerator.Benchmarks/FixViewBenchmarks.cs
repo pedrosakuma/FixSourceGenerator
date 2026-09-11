@@ -6,6 +6,8 @@ using DotnetDiagnostics.BenchmarkDotNet;
 using FixSourceGenerator.Attributes;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44;
 using FixSourceGenerator.Benchmarks.Generated.Fix.V44.Runtime;
+using NewOrderSingleReader = FixSourceGenerator.Benchmarks.Generated.Fix.V44.BenchmarkNewOrderSingleReader;
+using NewOrderSingleWriter = FixSourceGenerator.Benchmarks.Generated.Fix.V44.BenchmarkNewOrderSingleWriter;
 
 namespace FixSourceGenerator.Benchmarks;
 
@@ -105,14 +107,14 @@ public class FixViewBenchmarks
     }
 }
 
-[FixView("NewOrderSingle")]
+[FixView("BenchmarkNewOrderSingle")]
 public readonly ref partial struct OrderRoutingView
 {
     public partial ReadOnlySpan<byte> ClOrdID { get; }
     public partial decimal? Price { get; }
 }
 
-[FixView("NewOrderSingle")]
+[FixView("BenchmarkNewOrderSingle")]
 public readonly ref partial struct OrderRoutingWithPartiesView
 {
     public partial ReadOnlySpan<byte> ClOrdID { get; }

@@ -78,7 +78,10 @@ namespace FixSourceGenerator.Views
                     fieldNameOverride,
                     declaredTypeText,
                     isPartialDefinition: true,
-                    propertySyntax.GetLocation()));
+                    propertySyntax.GetLocation())
+                {
+                    TypeCandidates = GetTypeCandidates(context.SemanticModel, propertySyntax, member.Type)
+                });
             }
 
             return new FixViewRequest(
@@ -90,5 +93,85 @@ namespace FixSourceGenerator.Views
                 structSyntax.Identifier.GetLocation(),
                 properties.ToImmutable());
         }
+
+        private static ImmutableArray<string> GetTypeCandidates(
+            SemanticModel semanticModel, PropertyDeclarationSyntax property, ITypeSymbol type)
+        {
+            if (!ContainsError(type))
+            {
+                return ImmutableArray.Create(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+            }
+
+            // Schema enums/group readers do not exist until this generator's output is added.
+            // Resolve their source spelling against the consumer's lexical imports instead.
+            var usings = property.Ancestors().SelectMany(node => node switch
+            {
+                BaseNamespaceDeclarationSyntax ns => ns.Usings,
+                CompilationUnitSyntax unit => unit.Usings,
+                _ => default(SyntaxList<UsingDirectiveSyntax>)
+            }).Concat(semanticModel.Compilation.SyntaxTrees
+                .SelectMany(tree => tree.GetRoot().DescendantNodes().OfType<UsingDirectiveSyntax>())
+                .Where(usingDirective => usingDirective.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword)))
+                .Distinct().ToArray();
+
+            string text = property.Type.WithoutTrivia().ToString();
+            string suffix = string.Empty;
+            if (property.Type is NullableTypeSyntax nullable)
+            {
+                text = nullable.ElementType.WithoutTrivia().ToString();
+                suffix = "?";
+            }
+
+            string first = text.Split('.', ':')[0];
+            var alias = usings.FirstOrDefault(u => u.Alias?.Name.Identifier.ValueText == first);
+            if (alias?.Name != null)
+            {
+                text = alias.Name.ToString() + text.Substring(first.Length).Replace("::", ".");
+                // A type alias's target is resolved at its declaration, not at the property.
+                var aliasModel = semanticModel.Compilation.GetSemanticModel(alias.SyntaxTree);
+                var aliasType = aliasModel.GetTypeInfo(alias.Name).Type;
+                if (aliasType != null && !ContainsError(aliasType) && text == alias.Name.ToString())
+                {
+                    return ImmutableArray.Create(aliasType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) + suffix);
+                }
+            }
+
+            var candidates = ImmutableArray.CreateBuilder<string>();
+            if (text.StartsWith("global::", System.StringComparison.Ordinal))
+            {
+                candidates.Add(text + suffix);
+                return candidates.ToImmutable();
+            }
+
+            candidates.Add(text + suffix);
+            var containingNamespace = semanticModel.GetEnclosingSymbol(property.SpanStart)?.ContainingNamespace;
+            while (containingNamespace is { IsGlobalNamespace: false })
+            {
+                candidates.Add(containingNamespace.ToDisplayString() + "." + text + suffix);
+                containingNamespace = containingNamespace.ContainingNamespace;
+            }
+
+            foreach (var directive in usings.Where(u => u.Alias == null && u.StaticKeyword == default))
+            {
+                if (directive.Name != null)
+                {
+                    candidates.Add(directive.Name + "." + text + suffix);
+                    var directiveModel = semanticModel.Compilation.GetSemanticModel(directive.SyntaxTree);
+                    var namespaceSyntax = directive.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault();
+                    var importNamespace = namespaceSyntax == null ? null : directiveModel.GetDeclaredSymbol(namespaceSyntax) as INamespaceSymbol;
+                    while (importNamespace is { IsGlobalNamespace: false })
+                    {
+                        candidates.Add(importNamespace.ToDisplayString() + "." + directive.Name + "." + text + suffix);
+                        importNamespace = importNamespace.ContainingNamespace;
+                    }
+                }
+            }
+
+            return candidates.ToImmutable();
+        }
+
+        private static bool ContainsError(ITypeSymbol type) =>
+            type.TypeKind == TypeKind.Error ||
+            type is INamedTypeSymbol named && named.TypeArguments.Any(ContainsError);
     }
 }

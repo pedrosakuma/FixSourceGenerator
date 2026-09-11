@@ -186,13 +186,14 @@ namespace FixSourceGenerator
 
             try
             {
-                string? xmlContent = additionalText.GetText(cancellationToken)?.ToString();
+                var sourceText = additionalText.GetText(cancellationToken);
+                string? xmlContent = sourceText?.ToString();
                 if (string.IsNullOrEmpty(xmlContent))
                 {
                     return null;
                 }
 
-                var schema = SchemaReader.Parse(xmlContent!, path, diagnostic => diagnostics.Add(diagnostic));
+                var schema = SchemaReader.Parse(xmlContent!, path, diagnostic => diagnostics.Add(diagnostic), sourceText!);
                 if (schema == null)
                 {
                     // SchemaReader already reported FIX002 for the failure reason.

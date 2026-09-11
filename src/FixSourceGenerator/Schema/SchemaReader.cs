@@ -2,9 +2,11 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Xml;
 using System.Xml.Linq;
 using FixSourceGenerator.Diagnostics;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
 
 namespace FixSourceGenerator.Schema
 {
@@ -25,23 +27,34 @@ namespace FixSourceGenerator.Schema
         /// diagnostics but do not prevent a (possibly partial) model from being returned, so a
         /// single malformed message/field doesn't abort generation for the rest of the schema.
         /// </summary>
-        public static FixDictionary? Parse(string xmlContent, string schemaPath, Action<Diagnostic> reportDiagnostic)
+        /// <param name="xmlContent">The raw schema XML text.</param>
+        /// <param name="schemaPath">
+        /// The AdditionalFile path used both in FIX002's message and as the file path of every
+        /// reported <see cref="Location"/>.
+        /// </param>
+        /// <param name="reportDiagnostic">Sink for every diagnostic raised while parsing.</param>
+        public static FixDictionary? Parse(string xmlContent, string schemaPath, Action<Diagnostic> reportDiagnostic) =>
+            Parse(xmlContent, schemaPath, reportDiagnostic, SourceText.From(xmlContent));
+
+        internal static FixDictionary? Parse(string xmlContent, string schemaPath, Action<Diagnostic> reportDiagnostic, SourceText sourceText)
         {
+            var context = new ParseContext(schemaPath, sourceText, reportDiagnostic);
+
             XDocument document;
             try
             {
-                document = XDocument.Parse(xmlContent, LoadOptions.None);
+                document = XDocument.Parse(xmlContent, LoadOptions.SetLineInfo);
             }
-            catch (Exception ex)
+            catch (XmlException ex)
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MalformedSchema, Location.None, schemaPath, ex.Message));
+                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MalformedSchema, context.GetLocation(ex.LineNumber, ex.LinePosition, 0), schemaPath, ex.Message));
                 return null;
             }
 
             var root = document.Root;
             if (root == null || !string.Equals(root.Name.LocalName, "fix", StringComparison.OrdinalIgnoreCase))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MalformedSchema, Location.None, schemaPath, "missing <fix> root element"));
+                context.Report(FixDiagnostics.MalformedSchema, root, schemaPath, "missing <fix> root element");
                 return null;
             }
 
@@ -49,25 +62,25 @@ namespace FixSourceGenerator.Schema
             string? minorText = (string?)root.Attribute("minor");
             if (majorText == null)
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "fix", "major"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, root, "fix", "major");
             }
             else if (!int.TryParse(majorText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "major", majorText, "an integer"));
+                context.Report(FixDiagnostics.InvalidAttributeValue, root.Attribute("major"), "fix", "major", majorText, "an integer");
             }
             if (minorText == null)
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "fix", "minor"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, root, "fix", "minor");
             }
             else if (!int.TryParse(minorText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "minor", minorText, "an integer"));
+                context.Report(FixDiagnostics.InvalidAttributeValue, root.Attribute("minor"), "fix", "minor", minorText, "an integer");
             }
 
             string? servicePackText = (string?)root.Attribute("servicepack");
             if (servicePackText != null && !int.TryParse(servicePackText, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "fix", "servicepack", servicePackText, "an integer"));
+                context.Report(FixDiagnostics.InvalidAttributeValue, root.Attribute("servicepack"), "fix", "servicepack", servicePackText, "an integer");
             }
 
             int major = ParseIntOrDefault(majorText, 0);
@@ -84,7 +97,7 @@ namespace FixSourceGenerator.Schema
             {
                 foreach (var fieldEl in fieldsSection.Elements("field"))
                 {
-                    ParseFieldDefinition(fieldEl, fieldsByNumber, fieldsByName, reportDiagnostic);
+                    ParseFieldDefinition(fieldEl, fieldsByNumber, fieldsByName, context);
                 }
             }
 
@@ -98,13 +111,13 @@ namespace FixSourceGenerator.Schema
                     string? name = (string?)componentEl.Attribute("name");
                     if (string.IsNullOrEmpty(name))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "component", "name"));
+                        context.Report(FixDiagnostics.MissingRequiredAttribute, componentEl, "component", "name");
                         continue;
                     }
 
                     if (componentElementsByName.ContainsKey(name!))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.DuplicateDefinition, Location.None, "component", name));
+                        context.Report(FixDiagnostics.DuplicateDefinition, componentEl.Attribute("name"), "component", name);
                         continue;
                     }
 
@@ -117,12 +130,12 @@ namespace FixSourceGenerator.Schema
 
             foreach (var name in componentElementsByName.Keys.ToArray())
             {
-                ResolveComponent(name, componentElementsByName, componentsByName, componentResolutionState, fieldsByName, reportDiagnostic);
+                ResolveComponent(name, componentElementsByName, componentsByName, componentResolutionState, fieldsByName, context);
             }
 
             // ---- Stage 3: header / trailer / messages — resolved against fields+components. ----
-            var header = ParseEntries(root.Element("header"), fieldsByName, componentsByName, reportDiagnostic);
-            var trailer = ParseEntries(root.Element("trailer"), fieldsByName, componentsByName, reportDiagnostic);
+            var header = ParseEntries(root.Element("header"), fieldsByName, componentsByName, context, new SchemaOwner("header", "header"));
+            var trailer = ParseEntries(root.Element("trailer"), fieldsByName, componentsByName, context, new SchemaOwner("trailer", "trailer"));
 
             var messages = new List<FixMessageDef>();
             var messageNames = new HashSet<string>(StringComparer.Ordinal);
@@ -139,27 +152,27 @@ namespace FixSourceGenerator.Schema
 
                     if (string.IsNullOrEmpty(name))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "message", "name"));
+                        context.Report(FixDiagnostics.MissingRequiredAttribute, messageEl, "message", "name");
                         continue;
                     }
                     if (string.IsNullOrEmpty(msgType))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "message", "msgtype"));
+                        context.Report(FixDiagnostics.MissingRequiredAttribute, messageEl, "message", "msgtype");
                         continue;
                     }
 
                     if (!messageNames.Add(name!))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.DuplicateDefinition, Location.None, "message name", name));
+                        context.Report(FixDiagnostics.DuplicateDefinition, messageEl.Attribute("name"), "message name", name);
                         continue;
                     }
                     if (!messageTypes.Add(msgType!))
                     {
-                        reportDiagnostic(Diagnostic.Create(FixDiagnostics.DuplicateDefinition, Location.None, "message msgtype", msgType));
+                        context.Report(FixDiagnostics.DuplicateDefinition, messageEl.Attribute("msgtype"), "message msgtype", msgType);
                         continue;
                     }
 
-                    var entries = ParseEntries(messageEl, fieldsByName, componentsByName, reportDiagnostic);
+                    var entries = ParseEntries(messageEl, fieldsByName, componentsByName, context, new SchemaOwner("message", name!));
                     messages.Add(new FixMessageDef(name!, msgType!, msgCat, entries));
                 }
             }
@@ -181,7 +194,7 @@ namespace FixSourceGenerator.Schema
             XElement fieldEl,
             Dictionary<int, FixFieldDef> fieldsByNumber,
             Dictionary<string, FixFieldDef> fieldsByName,
-            Action<Diagnostic> reportDiagnostic)
+            ParseContext context)
         {
             string? numberText = (string?)fieldEl.Attribute("number");
             string? name = (string?)fieldEl.Attribute("name");
@@ -190,17 +203,17 @@ namespace FixSourceGenerator.Schema
             bool missingAttr = false;
             if (string.IsNullOrEmpty(numberText))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "field", "number"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, fieldEl, "field", "number");
                 missingAttr = true;
             }
             if (string.IsNullOrEmpty(name))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "field", "name"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, fieldEl, "field", "name");
                 missingAttr = true;
             }
             if (string.IsNullOrEmpty(type))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "field", "type"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, fieldEl, "field", "type");
                 missingAttr = true;
             }
 
@@ -211,7 +224,7 @@ namespace FixSourceGenerator.Schema
 
             if (!int.TryParse(numberText, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.InvalidAttributeValue, Location.None, "field", "number", numberText, "an integer"));
+                context.Report(FixDiagnostics.InvalidAttributeValue, fieldEl.Attribute("number"), "field", "number", numberText, "an integer");
                 return;
             }
 
@@ -223,7 +236,7 @@ namespace FixSourceGenerator.Schema
 
             if (fieldsByNumber.ContainsKey(number))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.DuplicateDefinition, Location.None, "field number", number.ToString(CultureInfo.InvariantCulture)));
+                context.Report(FixDiagnostics.DuplicateDefinition, fieldEl.Attribute("number"), "field number", number.ToString(CultureInfo.InvariantCulture));
             }
             else
             {
@@ -232,7 +245,7 @@ namespace FixSourceGenerator.Schema
 
             if (fieldsByName.ContainsKey(name!))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.DuplicateDefinition, Location.None, "field name", name));
+                context.Report(FixDiagnostics.DuplicateDefinition, fieldEl.Attribute("name"), "field name", name);
             }
             else
             {
@@ -246,13 +259,27 @@ namespace FixSourceGenerator.Schema
             Resolved
         }
 
+        /// <summary>Identifies the schema element (header/trailer/message/component/group) that owns a field/component reference, for use in FIX005's "{0} '{1}' references undefined {2} '{3}'" message.</summary>
+        private readonly struct SchemaOwner
+        {
+            public SchemaOwner(string kind, string name)
+            {
+                Kind = kind;
+                Name = name;
+            }
+
+            public string Kind { get; }
+
+            public string Name { get; }
+        }
+
         private static FixComponentDef? ResolveComponent(
             string name,
             Dictionary<string, XElement> componentElementsByName,
             Dictionary<string, FixComponentDef> componentsByName,
             Dictionary<string, ResolutionState> resolutionState,
             Dictionary<string, FixFieldDef> fieldsByName,
-            Action<Diagnostic> reportDiagnostic)
+            ParseContext context)
         {
             if (componentsByName.TryGetValue(name, out var resolved))
             {
@@ -269,18 +296,20 @@ namespace FixSourceGenerator.Schema
 
             if (resolutionState.TryGetValue(name, out var state) && state == ResolutionState.InProgress)
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.CircularComponentReference, Location.None, name));
+                context.Report(FixDiagnostics.CircularComponentReference, componentEl.Attribute("name") ?? (XObject)componentEl, name);
                 return null;
             }
 
             resolutionState[name] = ResolutionState.InProgress;
 
+            var owner = new SchemaOwner("component", name);
             var entries = ParseEntries(
                 componentEl,
                 fieldsByName,
                 componentsByName,
-                reportDiagnostic,
-                nestedComponentResolver: refName => ResolveComponent(refName, componentElementsByName, componentsByName, resolutionState, fieldsByName, reportDiagnostic));
+                context,
+                owner,
+                nestedComponentResolver: refName => ResolveComponent(refName, componentElementsByName, componentsByName, resolutionState, fieldsByName, context));
 
             var def = new FixComponentDef(name, entries);
             componentsByName[name] = def;
@@ -297,7 +326,8 @@ namespace FixSourceGenerator.Schema
             XElement? container,
             Dictionary<string, FixFieldDef> fieldsByName,
             Dictionary<string, FixComponentDef> componentsByName,
-            Action<Diagnostic> reportDiagnostic,
+            ParseContext context,
+            SchemaOwner owner,
             Func<string, FixComponentDef?>? nestedComponentResolver = null)
         {
             var entries = new List<FixEntry>();
@@ -311,22 +341,22 @@ namespace FixSourceGenerator.Schema
                 switch (child.Name.LocalName)
                 {
                     case "field":
-                        entries.Add(ParseFieldRef(child, fieldsByName, container.Name.LocalName, reportDiagnostic));
+                        entries.Add(ParseFieldRef(child, fieldsByName, owner, context));
                         break;
 
                     case "component":
-                        entries.Add(ParseComponentRef(child, componentsByName, container.Name.LocalName, reportDiagnostic, nestedComponentResolver));
+                        entries.Add(ParseComponentRef(child, componentsByName, owner, context, nestedComponentResolver));
                         break;
 
                     case "group":
-                        entries.Add(ParseGroupRef(child, fieldsByName, componentsByName, reportDiagnostic, nestedComponentResolver));
+                        entries.Add(ParseGroupRef(child, fieldsByName, componentsByName, owner, context, nestedComponentResolver));
                         break;
 
                     default:
-                        reportDiagnostic(Diagnostic.Create(
+                        context.Report(
                             FixDiagnostics.UnsupportedConstruct,
-                            Location.None,
-                            $"Unrecognized element <{child.Name.LocalName}> inside <{container.Name.LocalName}> is ignored"));
+                            child,
+                            $"Unrecognized element <{child.Name.LocalName}> inside <{container.Name.LocalName}> is ignored");
                         break;
                 }
             }
@@ -337,21 +367,21 @@ namespace FixSourceGenerator.Schema
         private static FixEntry ParseFieldRef(
             XElement fieldRefEl,
             Dictionary<string, FixFieldDef> fieldsByName,
-            string parentElementName,
-            Action<Diagnostic> reportDiagnostic)
+            SchemaOwner owner,
+            ParseContext context)
         {
             string? name = (string?)fieldRefEl.Attribute("name");
             bool required = IsRequired(fieldRefEl);
 
             if (string.IsNullOrEmpty(name))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "field", "name"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, fieldRefEl, "field", "name");
                 return new FixFieldRef(UnknownField, required);
             }
 
             if (!fieldsByName.TryGetValue(name!, out var fieldDef))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.UnresolvedReference, Location.None, parentElementName, name, "field", name));
+                context.Report(FixDiagnostics.UnresolvedReference, fieldRefEl.Attribute("name"), owner.Kind, owner.Name, "field", name);
                 return new FixFieldRef(new FixFieldDef(0, name!, "STRING", Array.Empty<FixValueDef>()), required);
             }
 
@@ -363,8 +393,8 @@ namespace FixSourceGenerator.Schema
         private static FixEntry ParseComponentRef(
             XElement componentRefEl,
             Dictionary<string, FixComponentDef> componentsByName,
-            string parentElementName,
-            Action<Diagnostic> reportDiagnostic,
+            SchemaOwner owner,
+            ParseContext context,
             Func<string, FixComponentDef?>? nestedComponentResolver)
         {
             string? name = (string?)componentRefEl.Attribute("name");
@@ -372,7 +402,7 @@ namespace FixSourceGenerator.Schema
 
             if (string.IsNullOrEmpty(name))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "component", "name"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, componentRefEl, "component", "name");
                 return new FixComponentRef(new FixComponentDef("Unknown", Array.Empty<FixEntry>()), required);
             }
 
@@ -384,7 +414,7 @@ namespace FixSourceGenerator.Schema
 
             if (componentDef == null)
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.UnresolvedReference, Location.None, parentElementName, name, "component", name));
+                context.Report(FixDiagnostics.UnresolvedReference, componentRefEl.Attribute("name"), owner.Kind, owner.Name, "component", name);
                 componentDef = new FixComponentDef(name!, Array.Empty<FixEntry>());
             }
 
@@ -395,7 +425,8 @@ namespace FixSourceGenerator.Schema
             XElement groupEl,
             Dictionary<string, FixFieldDef> fieldsByName,
             Dictionary<string, FixComponentDef> componentsByName,
-            Action<Diagnostic> reportDiagnostic,
+            SchemaOwner owner,
+            ParseContext context,
             Func<string, FixComponentDef?>? nestedComponentResolver)
         {
             string? name = (string?)groupEl.Attribute("name");
@@ -403,17 +434,18 @@ namespace FixSourceGenerator.Schema
 
             if (string.IsNullOrEmpty(name))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingRequiredAttribute, Location.None, "group", "name"));
+                context.Report(FixDiagnostics.MissingRequiredAttribute, groupEl, "group", "name");
                 name = "Unknown";
             }
 
             if (!fieldsByName.TryGetValue(name!, out var counterField))
             {
-                reportDiagnostic(Diagnostic.Create(FixDiagnostics.MissingGroupCounterField, Location.None, name));
+                context.Report(FixDiagnostics.MissingGroupCounterField, groupEl.Attribute("name") ?? (XObject)groupEl, name);
                 counterField = new FixFieldDef(0, name!, "NUMINGROUP", Array.Empty<FixValueDef>());
             }
 
-            var entries = ParseEntries(groupEl, fieldsByName, componentsByName, reportDiagnostic, nestedComponentResolver);
+            var groupOwner = new SchemaOwner("group", name!);
+            var entries = ParseEntries(groupEl, fieldsByName, componentsByName, context, groupOwner, nestedComponentResolver);
             return new FixGroupRef(name!, counterField, entries, required);
         }
 
@@ -431,6 +463,86 @@ namespace FixSourceGenerator.Schema
             }
 
             return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) ? value : defaultValue;
+        }
+
+        /// <summary>
+        /// Maps XML positions back to the original schema text.
+        /// </summary>
+        private sealed class ParseContext
+        {
+            private readonly Action<Diagnostic> _reportDiagnostic;
+
+            public ParseContext(string schemaPath, SourceText sourceText, Action<Diagnostic> reportDiagnostic)
+            {
+                SchemaPath = schemaPath;
+                SourceText = sourceText;
+                _reportDiagnostic = reportDiagnostic;
+            }
+
+            public string SchemaPath { get; }
+
+            public SourceText SourceText { get; }
+
+            /// <summary>
+            /// Reports a diagnostic located at <paramref name="locationSource"/> (an <see cref="XElement"/>
+            /// or <see cref="XAttribute"/> carrying line info from <see cref="LoadOptions.SetLineInfo"/>).
+            /// Falls back to <see cref="Location.None"/> when the node has no line info.
+            /// </summary>
+            public void Report(DiagnosticDescriptor descriptor, XObject? locationSource, params object?[] messageArgs)
+            {
+                _reportDiagnostic(Diagnostic.Create(descriptor, GetLocation(locationSource), messageArgs));
+            }
+
+            private Location GetLocation(XObject? node)
+            {
+                if (node is not IXmlLineInfo lineInfo || !lineInfo.HasLineInfo())
+                {
+                    return Location.None;
+                }
+
+                int length = node is XElement element ? element.Name.LocalName.Length : 1;
+                var startLocation = GetLocation(lineInfo.LineNumber, lineInfo.LinePosition, 0);
+                if (node is XAttribute && startLocation != Location.None)
+                {
+                    // Scan the original token: XAttribute.ToString() normalizes quotes,
+                    // whitespace and entities, so its length need not match the source.
+                    int start = startLocation.SourceSpan.Start;
+                    int cursor = start;
+                    while (cursor < SourceText.Length && SourceText[cursor] != '"' && SourceText[cursor] != '\'')
+                        cursor++;
+                    if (cursor < SourceText.Length)
+                    {
+                        char quote = SourceText[cursor++];
+                        while (cursor < SourceText.Length && SourceText[cursor] != quote)
+                            cursor++;
+                        length = Math.Min(cursor + 1, SourceText.Length) - start;
+                    }
+                }
+                return GetLocation(lineInfo.LineNumber, lineInfo.LinePosition, length);
+            }
+
+            public Location GetLocation(int lineNumber, int linePosition, int length)
+            {
+                int lineIndex = lineNumber - 1;
+                if (lineIndex < 0 || lineIndex >= SourceText.Lines.Count)
+                {
+                    return Location.None;
+                }
+
+                var textLine = SourceText.Lines[lineIndex];
+                int character = Math.Max(0, linePosition - 1);
+                int start = Math.Min(textLine.Start + character, textLine.End);
+                int end = Math.Min(start + length, SourceText.Length);
+                if (end < start)
+                {
+                    end = start;
+                }
+
+                var span = TextSpan.FromBounds(start, end);
+                var linePositionSpan = SourceText.Lines.GetLinePositionSpan(span);
+                return Location.Create(SchemaPath, span, linePositionSpan);
+            }
+
         }
     }
 }

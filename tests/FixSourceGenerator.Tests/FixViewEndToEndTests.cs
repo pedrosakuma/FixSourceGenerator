@@ -1253,6 +1253,178 @@ namespace Acme.Views
         Assert.Equal((byte)'1', ordType);
     }
 
+    [Fact]
+    public void Usage_guide_FixView_declaration_compiles_and_reads_enums_and_groups()
+    {
+        string guide = LoadTestData("USAGE.md");
+        int marker = guide.IndexOf("<!-- fixview-routing-declaration -->", StringComparison.Ordinal);
+        Assert.True(marker >= 0);
+        int start = guide.IndexOf("```csharp", marker, StringComparison.Ordinal) + "```csharp".Length;
+        int end = guide.IndexOf("```", start, StringComparison.Ordinal);
+        var assembly = CompileGeneratedAssembly(guide.Substring(start, end - start) + """
+
+            public static class GuideHarness
+            {
+                public static string Read(byte[] buffer)
+                {
+                    var view = new OrderRoutingView(buffer);
+                    var parties = view.NoPartyIDs.GetEnumerator();
+                    return $"{(byte)view.Side}:{view.Price}:{view.NoPartyIDs.Count}:" +
+                        (parties.MoveNext() ? System.Text.Encoding.ASCII.GetString(parties.Current.PartyID) : "");
+                }
+            }
+            """, LoadTestData("FIX44-mini.xml"));
+        var value = assembly.GetType("GuideHarness")!.GetMethod("Read")!.Invoke(null,
+            new object[] { TestSupport.Fix("11=ORDER", "54=1", "44=12", "453=1", "448=PARTY", "447=D", "452=1") });
+        Assert.Equal("49:12:1:PARTY", value);
+    }
+
+    [Theory]
+    [InlineData("using Acme.Fix.V44;", "Side", "NoPartyIDsGroupReader")]
+    [InlineData("", "Acme.Fix.V44.Side", "Acme.Fix.V44.NoPartyIDsGroupReader")]
+    [InlineData("", "global::Acme.Fix.V44.Side", "global::Acme.Fix.V44.NoPartyIDsGroupReader")]
+    [InlineData("using Direction = Acme.Fix.V44.Side; using Parties = Acme.Fix.V44.NoPartyIDsGroupReader;", "Direction", "Parties")]
+    [InlineData("using Fix = Acme.Fix.V44;", "Fix.Side", "Fix.NoPartyIDsGroupReader")]
+    [InlineData("global using Acme.Fix.V44;", "Side", "NoPartyIDsGroupReader")]
+    public void Consumer_type_names_are_resolved_and_emitted_without_consumer_imports(string imports, string side, string group)
+    {
+        string source = $$"""
+            {{imports}}
+            using FixSourceGenerator.Attributes;
+            namespace Consumer;
+            [FixView("NewOrderSingle")]
+            public ref partial struct View
+            {
+                public partial {{side}} Side { get; }
+                public partial {{group}} NoPartyIDs { get; }
+                public partial System.Nullable<System.Decimal> Price { get; }
+            }
+            public static class Harness
+            {
+                public static int Read(byte[] buffer)
+                {
+                    var view = new View(buffer);
+                    return (byte)view.Side + view.NoPartyIDs.Count;
+                }
+            }
+            """;
+        var assembly = CompileGeneratedAssembly(source, LoadTestData("FIX44-mini.xml"));
+        Assert.Equal(50, assembly.GetType("Consumer.Harness")!.GetMethod("Read")!.Invoke(null,
+            new object[] { TestSupport.Fix("54=1", "453=1", "448=PARTY") }));
+    }
+
+    [Theory]
+    [InlineData("using Wrong;", "Side", "NoPartyIDsGroupReader")]
+    [InlineData("using Acme.Fix.V44;", "Wrong.Side", "Wrong.NoPartyIDsGroupReader")]
+    [InlineData("using Direction = Wrong.Side; using Parties = Wrong.NoPartyIDsGroupReader;", "Direction", "Parties")]
+    public void Same_named_consumer_types_from_wrong_namespace_are_rejected(string imports, string side, string group)
+    {
+        var (result, _) = RunGenerator($$"""
+            {{imports}}
+            using FixSourceGenerator.Attributes;
+            namespace Wrong { public enum Side { Buy } public ref struct NoPartyIDsGroupReader { } }
+            namespace Consumer
+            {
+                [FixView("NewOrderSingle")]
+                public ref partial struct View
+                {
+                    public partial {{side}} Side { get; }
+                    public partial {{group}} NoPartyIDs { get; }
+                }
+            }
+            """);
+        var diagnostics = result.Diagnostics.Where(d => d.Id == "FIX014").ToArray();
+        Assert.Equal(2, diagnostics.Length);
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("global::Acme.Fix.V44.Side"));
+        Assert.Contains(diagnostics, d => d.GetMessage().Contains("global::Acme.Fix.V44.NoPartyIDsGroupReader"));
+    }
+
+    [Theory]
+    [InlineData("NewOrderSingle")]
+    [InlineData("NewOrderSingle.NoPartyIDs")]
+    [InlineData("Instrument")]
+    [InlineData("NoPartyIDs")]
+    public void Ambiguous_cross_version_targets_report_same_FIX016_regardless_of_schema_order(string target)
+    {
+        string v44 = LoadTestData("FIX44-mini.xml");
+        string v42 = v44.Replace("minor=\"4\"", "minor=\"2\"").Replace("number=\"44\"", "number=\"144\"");
+        string source = $$"""
+            using FixSourceGenerator.Attributes;
+            [FixView("{{target}}")]
+            public ref partial struct View { }
+            """;
+        var schemas = new[] { ("FIX44.xml", v44), ("FIX42.xml", v42) };
+        var first = Assert.Single(RunGeneratorWithSchemas(source, schemas).Result.Diagnostics, d => d.Id == "FIX016");
+        var reversed = Assert.Single(RunGeneratorWithSchemas(source, schemas.Reverse().ToArray()).Result.Diagnostics, d => d.Id == "FIX016");
+        Assert.Equal(first.GetMessage(), reversed.GetMessage());
+        Assert.Contains("Acme.Fix.V42:", first.GetMessage());
+        Assert.Contains("Acme.Fix.V44:", first.GetMessage());
+    }
+
+    [Fact]
+    public void Qualified_path_unique_to_one_version_is_not_rejected()
+    {
+        string v44 = LoadTestData("FIX44-mini.xml");
+        string v42 = v44.Replace("minor=\"4\"", "minor=\"2\"").Replace("NoPartyIDs", "NoOtherParties");
+        CompileGeneratedAssembly("""
+            using FixSourceGenerator.Attributes;
+            [FixView("NewOrderSingle.NoPartyIDs")]
+            public ref partial struct View
+            {
+                public partial System.ReadOnlySpan<byte> PartyID { get; }
+            }
+            """, new[] { ("FIX44.xml", v44), ("FIX42.xml", v42) });
+    }
+
+    [Fact]
+    public void Optional_generated_enum_preserves_nullable_behavior_with_relative_namespace_import()
+    {
+        string schema = LoadTestData("FIX44-mini.xml").Replace(
+            "<field name=\"Side\" required=\"Y\"/>", "<field name=\"Side\" required=\"N\"/>");
+        var assembly = CompileGeneratedAssembly("""
+            using FixSourceGenerator.Attributes;
+            namespace Acme.Consumer
+            {
+                using Fix.V44;
+                [FixView("NewOrderSingle")]
+                public ref partial struct View
+                {
+                    public partial Side? Side { get; }
+                }
+                public static class Harness
+                {
+                    public static int Read(byte[] buffer)
+                    {
+                        var view = new View(buffer);
+                        return view.Side.HasValue ? (byte)view.Side.Value : -1;
+                    }
+                }
+            }
+            """, schema);
+        var read = assembly.GetType("Acme.Consumer.Harness")!.GetMethod("Read")!;
+        Assert.Equal(-1, read.Invoke(null, new object[] { TestSupport.Fix("11=ORDER") }));
+        Assert.Equal(49, read.Invoke(null, new object[] { TestSupport.Fix("54=1") }));
+    }
+
+    [Fact]
+    public void Fully_qualified_enum_and_group_respect_custom_root_namespace()
+    {
+        const string source = """
+            using FixSourceGenerator.Attributes;
+            [FixView("NewOrderSingle")]
+            public ref partial struct View
+            {
+                public partial global::Custom.Trading.Fix.V44.Side Side { get; }
+                public partial global::Custom.Trading.Fix.V44.NoPartyIDsGroupReader NoPartyIDs { get; }
+            }
+            """;
+        var (result, compilation) = RunGenerator(source, "Custom.Trading");
+        Assert.Empty(result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error));
+        using var stream = new MemoryStream();
+        var emitted = compilation.AddSyntaxTrees(result.Results.SelectMany(r => r.GeneratedSources).Select(s => s.SyntaxTree)).Emit(stream);
+        Assert.True(emitted.Success, string.Join("\n", emitted.Diagnostics));
+    }
+
     private sealed class InMemoryAdditionalText : AdditionalText
     {
         private readonly SourceText _text;

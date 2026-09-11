@@ -15,9 +15,12 @@ separate maintainer actions.
 
 Use a modern SDK/compiler when targeting net6 with C#11. The compatibility floor does not
 make the out-of-support .NET 6 runtime a recommended deployment target.
-The [runnable example](../examples/ScopedCodec) exercises both configurations in CI and reuses
+The [runnable example](../examples/ScopedCodec) (see its own
+[README](../examples/ScopedCodec/README.md)) exercises both configurations in CI and reuses
 [FIX44-mini.xml](../tests/FixSourceGenerator.Tests/TestData/FIX44-mini.xml). The full FIX44
-compatibility consumer remains in `tests/FixSourceGenerator.Compatibility`.
+compatibility consumer remains in `tests/FixSourceGenerator.Compatibility`. Hit a surprise while
+adopting this? [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) covers stale-handle/poison-state
+symptoms, missing generated types, and inspecting generated code.
 
 ## Breaking writer changes
 

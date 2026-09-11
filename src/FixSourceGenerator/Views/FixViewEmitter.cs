@@ -60,10 +60,6 @@ namespace FixSourceGenerator.Views
                         }
                     }
 
-                    if (scopeCandidates.Count != 0)
-                    {
-                        break;
-                    }
                 }
 
                 if (scopeCandidates.Count == 0)
@@ -92,7 +88,8 @@ namespace FixSourceGenerator.Views
                     Diagnostics.FixDiagnostics.FixViewAmbiguousGroupScope,
                     request.StructLocation,
                     request.MessageName,
-                    request.StructName));
+                    request.StructName,
+                    string.Join(", ", scopeCandidates.Select(c => c.SchemaNs + ":" + c.Name).OrderBy(c => c, StringComparer.Ordinal))));
                 return null;
             }
 
@@ -131,7 +128,7 @@ namespace FixSourceGenerator.Views
 
                 if (groupsByName.TryGetValue(lookupName, out var groupMatch))
                 {
-                    if (!FixViewTypeCompatibility.IsGroupTypeCompatible(property.DeclaredTypeText, schemaNs!, groupMatch.Name))
+                    if (!FixViewTypeCompatibility.IsGroupTypeCompatible(property, schemaNs!, groupMatch.Name))
                     {
                         reportDiagnostic(Diagnostic.Create(
                             Diagnostics.FixDiagnostics.FixViewIncompatibleType,
@@ -140,7 +137,7 @@ namespace FixSourceGenerator.Views
                             property.DeclaredTypeText,
                             groupMatch.Name,
                             "group",
-                            FixViewTypeCompatibility.GroupReaderDisplayName(groupMatch.Name)));
+                            FixViewTypeCompatibility.GroupReaderDisplayName(schemaNs!, groupMatch.Name)));
                         hadError = true;
                         continue;
                     }
@@ -178,8 +175,8 @@ namespace FixSourceGenerator.Views
                     continue;
                 }
 
-                var (accepted, displayList) = FixViewTypeCompatibility.GetAcceptedTypes(match.Field, match.Required);
-                if (!FixViewTypeCompatibility.IsCompatible(property.DeclaredTypeText, accepted))
+                var (accepted, displayList) = FixViewTypeCompatibility.GetAcceptedTypes(match.Field, match.Required, schemaNs!);
+                if (!FixViewTypeCompatibility.IsCompatible(property, accepted))
                 {
                     reportDiagnostic(Diagnostic.Create(
                         Diagnostics.FixDiagnostics.FixViewIncompatibleType,
@@ -269,7 +266,7 @@ namespace FixSourceGenerator.Views
             {
                 if (FixViewFieldCollector.TryResolveQualifiedScope(schema, path, messageRoot, out var entries, out var name))
                 {
-                    candidates.Add((entries!, name!, runtimeNs, schemaNs));
+                    candidates.Add((entries!, path, runtimeNs, schemaNs));
                 }
             }
         }
@@ -283,7 +280,7 @@ namespace FixSourceGenerator.Views
         {
             foreach (var message in messages)
             {
-                CollectGroups(message.Entries, name, runtimeNs, schemaNs, candidates);
+                CollectGroups(message.Entries, name, runtimeNs, schemaNs, candidates, message.Name);
             }
         }
 
@@ -292,7 +289,8 @@ namespace FixSourceGenerator.Views
             string name,
             string runtimeNs,
             string schemaNs,
-            List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)> candidates)
+            List<(IReadOnlyList<FixEntry> Entries, string Name, string RuntimeNs, string SchemaNs)> candidates,
+            string path)
         {
             foreach (var entry in entries)
             {
@@ -301,13 +299,13 @@ namespace FixSourceGenerator.Views
                     case FixGroupRef group:
                         if (string.Equals(group.Name, name, StringComparison.Ordinal))
                         {
-                            candidates.Add((group.Entries, group.Name, runtimeNs, schemaNs));
+                            candidates.Add((group.Entries, path + "." + group.Name, runtimeNs, schemaNs));
                         }
 
-                        CollectGroups(group.Entries, name, runtimeNs, schemaNs, candidates);
+                        CollectGroups(group.Entries, name, runtimeNs, schemaNs, candidates, path + "." + group.Name);
                         break;
                     case FixComponentRef component:
-                        CollectGroups(component.Component.Entries, name, runtimeNs, schemaNs, candidates);
+                        CollectGroups(component.Component.Entries, name, runtimeNs, schemaNs, candidates, path + "." + component.Component.Name);
                         break;
                 }
             }
@@ -335,7 +333,7 @@ namespace FixSourceGenerator.Views
 
             w.Open($"partial struct {request.StructName}");
 
-            string r = $"{runtimeNs}.FixSpanReader";
+            string r = $"global::{runtimeNs}.FixSpanReader";
             var directGroups = new List<FixGroupRef>();
             FixViewFieldCollector.CollectDirectGroups(scopeEntries, directGroups);
             // Ids + method bodies for the group-boundary skip helpers this scope needs are owned
@@ -459,7 +457,7 @@ namespace FixSourceGenerator.Views
             foreach (var slot in slots)
             {
                 w.Line();
-                EmitPropertyImpl(w, runtimeNs, slot.Property, slot.Field, slot.Required);
+                EmitPropertyImpl(w, runtimeNs, schemaNs, slot.Property, slot.Field, slot.Required);
             }
 
             foreach (var groupSlot in groupSlots)
@@ -483,20 +481,21 @@ namespace FixSourceGenerator.Views
         /// </summary>
         private static void EmitGroupPropertyImpl(CodeWriter w, string schemaNs, FixViewPropertyModel property, FixGroupRef group)
         {
-            string groupReaderType = $"{schemaNs}.{group.Name.ToIdentifier()}GroupReader";
+            string groupReaderType = $"global::{schemaNs}.{group.Name.ToIdentifier()}GroupReader";
             string slice = $"_buffer.Slice(_{property.PropertyName}Start, _{property.PropertyName}Length)";
             w.Line($"public partial {groupReaderType} {property.PropertyName} {{ get => new {groupReaderType}({slice}); }}");
         }
 
-        private static void EmitPropertyImpl(CodeWriter w, string runtimeNs, FixViewPropertyModel property, FixFieldDef field, bool required)
+        private static void EmitPropertyImpl(CodeWriter w, string runtimeNs, string schemaNs, FixViewPropertyModel property, FixFieldDef field, bool required)
         {
             string prop = property.PropertyName;
             string startField = $"_{prop}Start";
             string lengthField = $"_{prop}Length";
             string presentField = $"_{prop}Present";
             string valueExpr = $"_buffer.Slice({startField}, {lengthField})";
-            string declaredType = FixViewTypeCompatibility.Normalize(property.DeclaredTypeText);
-            string r = $"{runtimeNs}.FixSpanReader";
+            var (accepted, _) = FixViewTypeCompatibility.GetAcceptedTypes(field, required, schemaNs);
+            string declaredType = property.TypeCandidates.Select(FixViewTypeCompatibility.Normalize).First(accepted.Contains);
+            string r = $"global::{runtimeNs}.FixSpanReader";
 
             // Raw escape hatch: the declared type is exactly ReadOnlySpan<byte> (or its
             // optional-marker-less form; span never has a nullable variant), regardless of the
@@ -513,7 +512,7 @@ namespace FixSourceGenerator.Views
 
             if (FixEntryHelpers.IsEnumEligible(field))
             {
-                string enumName = field.Name.ToIdentifier();
+                string enumName = $"global::{schemaNs}.{field.Name.ToIdentifier()}";
                 var translated = TypeTranslator.Translate(field.Type);
                 bool isCharBacked = translated.Category == FixTypeCategory.Char;
                 string parseExpr = isCharBacked ? $"{r}.ParseByte({valueExpr})" : $"{r}.ParseInt({valueExpr})";

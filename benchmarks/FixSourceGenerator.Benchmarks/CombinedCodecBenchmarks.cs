@@ -53,7 +53,7 @@ internal sealed class CombinedCodecWorkload
             _ => throw new ArgumentException("Expected Small, X1/X10/X50 or W1/W10/W50.", nameof(scenario)),
         };
         _market.Entries = _entries;
-        _smallState = _small ? new SmallRuntime.FixWriterState[Small.NewOrderSingleWriter.RequiredStateLength] : [];
+        _smallState = _small ? new SmallRuntime.FixWriterState[Small.BenchmarkNewOrderSingleWriter.RequiredStateLength] : [];
         _state = _small ? [] : new FixWriterState[_snapshot
             ? MarketDataSnapshotFullRefreshWriter.RequiredStateLength
             : MarketDataIncrementalRefreshWriter.RequiredStateLength];
@@ -99,7 +99,7 @@ internal sealed class CombinedCodecWorkload
             return;
         }
 
-        var message = new Small.NewOrderSingleWriter(_smallBuffer, _smallState, "SENDER"u8, "TARGET"u8, 7,
+        var message = new Small.BenchmarkNewOrderSingleWriter(_smallBuffer, _smallState, "SENDER"u8, "TARGET"u8, 7,
             new DateTime(2024, 1, 15, 10, 30, 5, DateTimeKind.Utc), "ORD-1"u8);
         var instrument = message.BeginInstrument("MSFT"u8);
         var tail = Small.FixWriterScopeExtensions.EndInstrument(instrument.SkipSecurityID(),

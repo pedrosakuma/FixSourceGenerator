@@ -11,12 +11,15 @@ included here purely as a baseline for comparison, never as a dependency of the 
 This project references `FixSourceGenerator.csproj` the same way a real consumer project would
 (`docs/USAGE.md` §1: `ProjectReference` with `OutputItemType="Analyzer"`, `AdditionalFiles` for
 the schema XML) — so the benchmarks exercise the actual generated code, not a hand-written stand-in.
-The schema is `Schema/FIX44-mini.xml` (the same fixture used by `SchemaReaderTests`), producing a
-`NewOrderSingle` with a component (`Instrument`), an enumerated `CHAR` field (`Side`), and a
+The schema is `Schema/FIX44-mini.xml` (a benchmark-local variant of the parser-test fixture), producing a
+`BenchmarkNewOrderSingle` with a component (`Instrument`), an enumerated `CHAR` field (`Side`), and a
 repeating group (`NoPartyIDs`) — enough surface to exercise every reader/writer code path
 (scalar/span/enum fields, component nesting, group iteration).
 The writer-formatting benchmarks additionally consume the full `FIX50SP2.xml` test dictionary
 to exercise generated X/W messages with 10/50 entries.
+The miniature message has a distinct source name because the full dictionary also declares
+`NewOrderSingle`: `[FixView]` rejects ambiguous targets across schemas with `FIX016` rather than
+choosing whichever file came first. Its FIX `MsgType=D`, fields and wire shape are unchanged.
 
 ## Running
 
